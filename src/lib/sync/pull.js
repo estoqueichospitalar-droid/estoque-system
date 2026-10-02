@@ -5,10 +5,13 @@
 // a corrida em App.jsx). Nunca lança: uma falha aqui deixa o app seguir
 // com o que já tinha no localStorage.
 
-import { supabase, isSupabaseConfigured } from '../supabaseClient';
+import { supabase, isSupabaseConfigured, buscarTodasLinhas } from '../supabaseClient';
+import { pushVendasMes } from './push';
 import { CHAVE_CONFIG_PRODUTOS } from '../configProdutos';
 import { CHAVE_SNAPSHOTS, CHAVE_PEDIDOS } from '../historicoPedidos';
-import { CHAVE_VENDAS_MENSAIS, MAX_MESES_LOCAIS, podarParaLimiteLocal, registrarCodigosNoIndiceHistorico } from '../historicoVendas';
+import {
+  CHAVE_VENDAS_MENSAIS, MAX_MESES_LOCAIS, podarParaLimiteLocal, registrarCodigosNoIndiceHistorico, substituirResumosMeses,
+} from '../historicoVendas';
 import { CHAVE_FORNECEDORES, CHAVE_VINCULOS } from '../fornecedores';
 import { salvarLocalComFallback } from '../storageSeguro';
 
@@ -32,11 +35,10 @@ function salvarLocal(chave, valor) {
 }
 
 async function puxarConfigProdutos() {
-  const { data, error } = await supabase.from('config_produtos').select('*');
-  if (error) throw error;
+  const data = await buscarTodasLinhas(() => supabase.from('config_produtos').select('*').order('codigo'));
 
   const local = lerLocal(CHAVE_CONFIG_PRODUTOS, {});
-  for (const row of data ?? []) {
+  for (const row of data) {
     const remoto = {
       estoqueMinimo: row.estoque_minimo,
       estoqueMinimoOrigem: row.estoque_minimo_origem,
@@ -67,14 +69,14 @@ async function puxarSnapshots() {
   if (!snaps || snaps.length === 0) return;
 
   const ids = snaps.map((s) => s.id);
-  const { data: itens, error: erroItens } = await supabase
+  const itens = await buscarTodasLinhas(() => supabase
     .from('itens_estoque')
     .select('*')
-    .in('snapshot_id', ids);
-  if (erroItens) throw erroItens;
+    .in('snapshot_id', ids)
+    .order('id'));
 
   const itensPorSnapshot = new Map();
-  for (const it of itens ?? []) {
+  for (const it of itens) {
     if (!itensPorSnapshot.has(it.snapshot_id)) itensPorSnapshot.set(it.snapshot_id, []);
     itensPorSnapshot.get(it.snapshot_id).push({
       codigo: it.codigo,
@@ -113,19 +115,23 @@ async function puxarSnapshots() {
 }
 
 async function puxarPedidos() {
-  const { data: pedidos, error } = await supabase.from('pedidos_compra').select('*');
-  if (error) throw error;
-  if (!pedidos || pedidos.length === 0) return;
+  const pedidos = await buscarTodasLinhas(() => supabase.from('pedidos_compra').select('*').order('id'));
+  if (pedidos.length === 0) return;
 
   const ids = pedidos.map((p) => p.id);
-  const { data: itens, error: erroItens } = await supabase
-    .from('itens_pedido_compra')
-    .select('*')
-    .in('pedido_id', ids);
-  if (erroItens) throw erroItens;
+  // `.in()` com centenas de ids estoura o tamanho da URL — busca em lotes.
+  const itens = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const lote = ids.slice(i, i + 100);
+    itens.push(...await buscarTodasLinhas(() => supabase
+      .from('itens_pedido_compra')
+      .select('*')
+      .in('pedido_id', lote)
+      .order('id')));
+  }
 
   const itensPorPedido = new Map();
-  for (const it of itens ?? []) {
+  for (const it of itens) {
     if (!itensPorPedido.has(it.pedido_id)) itensPorPedido.set(it.pedido_id, []);
     itensPorPedido.get(it.pedido_id).push({
       codigo: it.codigo,
@@ -160,33 +166,62 @@ async function puxarPedidos() {
 }
 
 async function puxarVendas() {
-  // Só busca o item a item dos meses mais recentes — puxar TODO o histórico
-  // (que só cresce, mês a mês, pra sempre) a cada login gastaria banda e
-  // memória à toa, já que só os mais recentes cabem no cache local mesmo
-  // (ver podarParaLimiteLocal em src/lib/historicoVendas.js).
-  const { data: todosMeses, error: erroMeses } = await supabase
+  // Cabeçalhos de TODOS os meses do servidor (uma linha por mês, leve) — é o
+  // que alimenta o gráfico de faturamento, que mostra o histórico inteiro
+  // independente de quantos meses cabem no cache detalhado.
+  const cabecalhosRemotos = await buscarTodasLinhas(() => supabase
     .from('vendas_mensais')
-    .select('mes_chave')
-    .order('mes_chave', { ascending: false })
-    .limit(MAX_MESES_LOCAIS);
-  if (erroMeses) throw erroMeses;
-  if (!todosMeses || todosMeses.length === 0) return;
+    .select('mes_chave, mes_label, periodo_inicio, periodo_fim, resumo, nome_arquivo, importado_em')
+    .order('mes_chave'));
+  const remotoPorChave = new Map(cabecalhosRemotos.map((c) => [c.mes_chave, c]));
+  const local = lerLocal(CHAVE_VENDAS_MENSAIS, {});
 
-  const chaves = todosMeses.map((m) => m.mes_chave);
-  const { data: meses, error } = await supabase.from('vendas_mensais').select('*').in('mes_chave', chaves);
-  if (error) throw error;
-  if (!meses || meses.length === 0) return;
+  // Meses que só existem neste navegador (importados antes da sincronização
+  // existir, ou cuja gravação no servidor falhou) ou que aqui são mais novos:
+  // sobem agora. Sem isso, cada usuário só enxerga o que ele mesmo importou
+  // ou o que por acaso já estava no servidor.
+  const pendentes = Object.values(local).filter((m) => {
+    if (!m?.mesChave || !m.itens?.length) return false;
+    const r = remotoPorChave.get(m.mesChave);
+    return !r || new Date(m.importadoEm).getTime() > new Date(r.importado_em).getTime();
+  });
+  for (const m of pendentes) await pushVendasMes(m);
 
-  const { data: itens, error: erroItens } = await supabase
-    .from('itens_venda_mensal')
-    .select('*')
-    .in('mes_chave', chaves);
-  if (erroItens) throw erroItens;
+  const indice = new Map(cabecalhosRemotos.map((c) => [c.mes_chave, {
+    mesChave: c.mes_chave,
+    mesLabel: c.mes_label,
+    periodoInicio: c.periodo_inicio,
+    periodoFim: c.periodo_fim,
+    resumo: c.resumo,
+    importadoEm: c.importado_em,
+  }]));
+  for (const m of pendentes) indice.set(m.mesChave, m);
+  substituirResumosMeses(Array.from(indice.values()));
 
-  const itensPorMes = new Map();
-  for (const it of itens ?? []) {
-    if (!itensPorMes.has(it.mes_chave)) itensPorMes.set(it.mes_chave, []);
-    itensPorMes.get(it.mes_chave).push({
+  // Item a item só dos meses mais recentes (limite do cache local).
+  const chaves = Array.from(indice.keys()).sort().slice(-MAX_MESES_LOCAIS);
+  for (const chave of chaves) {
+    const cab = indice.get(chave);
+    const existente = local[chave];
+    const esperado = cab.resumo?.produtosVendidos;
+    const completo = existente
+      && new Date(existente.importadoEm).getTime() === new Date(cab.importadoEm).getTime()
+      && (esperado == null || existente.itens?.length === esperado);
+    if (completo) continue;
+
+    const linhas = await buscarTodasLinhas(() => supabase
+      .from('itens_venda_mensal')
+      .select('*')
+      .eq('mes_chave', chave)
+      .order('id'));
+    // O servidor tem o cabeçalho do mês mas só parte dos itens (envio
+    // interrompido), e este navegador tem o mês completo: reenvia em vez de
+    // sobrescrever o cache bom com o incompleto.
+    if (esperado != null && linhas.length < esperado && existente?.itens?.length === esperado) {
+      await pushVendasMes(existente);
+      continue;
+    }
+    const itens = linhas.map((it) => ({
       codigo: it.codigo,
       codigoBarras: it.codigo_barras,
       descricao: it.descricao,
@@ -195,24 +230,19 @@ async function puxarVendas() {
       qtdeVolumes: Number(it.qtde_volumes),
       totComissoes: Number(it.tot_comissoes),
       totVendas: Number(it.tot_vendas),
-    });
-  }
-
-  const local = lerLocal(CHAVE_VENDAS_MENSAIS, {});
-  for (const m of meses) {
+    }));
     const remoto = {
-      mesChave: m.mes_chave,
-      mesLabel: m.mes_label,
-      periodoInicio: m.periodo_inicio,
-      periodoFim: m.periodo_fim,
-      resumo: m.resumo,
-      nomeArquivo: m.nome_arquivo,
-      importadoEm: m.importado_em,
-      itens: itensPorMes.get(m.mes_chave) ?? [],
+      mesChave: chave,
+      mesLabel: cab.mesLabel,
+      periodoInicio: cab.periodoInicio,
+      periodoFim: cab.periodoFim,
+      resumo: cab.resumo,
+      nomeArquivo: remotoPorChave.get(chave)?.nome_arquivo ?? null,
+      importadoEm: cab.importadoEm,
+      itens,
     };
-    const existente = local[m.mes_chave];
-    if (!existente || new Date(remoto.importadoEm) > new Date(existente.importadoEm ?? 0)) {
-      local[m.mes_chave] = remoto;
+    if (!existente || new Date(remoto.importadoEm).getTime() >= new Date(existente.importadoEm ?? 0).getTime()) {
+      local[chave] = remoto;
     }
   }
   salvarLocal(CHAVE_VENDAS_MENSAIS, podarParaLimiteLocal(local));
@@ -228,25 +258,14 @@ async function puxarVendas() {
  * de histórico — o limite padrão do PostgREST é 1000 por chamada.
  */
 async function puxarIndiceCodigosVenda() {
-  const TAMANHO_PAGINA = 1000;
-  const codigos = new Set();
-  for (let inicio = 0; ; inicio += TAMANHO_PAGINA) {
-    const { data, error } = await supabase
-      .from('itens_venda_mensal')
-      .select('codigo')
-      .range(inicio, inicio + TAMANHO_PAGINA - 1);
-    if (error) throw error;
-    if (!data || data.length === 0) break;
-    for (const row of data) codigos.add(row.codigo);
-    if (data.length < TAMANHO_PAGINA) break;
-  }
+  const linhas = await buscarTodasLinhas(() => supabase.from('itens_venda_mensal').select('codigo').order('id'));
+  const codigos = new Set(linhas.map((row) => row.codigo));
   if (codigos.size > 0) registrarCodigosNoIndiceHistorico(codigos);
 }
 
 async function puxarFornecedores() {
-  const { data, error } = await supabase.from('fornecedores').select('*');
-  if (error) throw error;
-  if (!data || data.length === 0) return;
+  const data = await buscarTodasLinhas(() => supabase.from('fornecedores').select('*').order('id'));
+  if (data.length === 0) return;
 
   const local = lerLocal(CHAVE_FORNECEDORES, []);
   const porId = new Map(local.map((f) => [f.id, f]));
@@ -276,9 +295,8 @@ async function puxarFornecedores() {
 }
 
 async function puxarVinculosProdutoFornecedor() {
-  const { data, error } = await supabase.from('produto_fornecedor').select('*');
-  if (error) throw error;
-  if (!data || data.length === 0) return;
+  const data = await buscarTodasLinhas(() => supabase.from('produto_fornecedor').select('*').order('id'));
+  if (data.length === 0) return;
 
   const local = lerLocal(CHAVE_VINCULOS, []);
   const porId = new Map(local.map((v) => [v.id, v]));

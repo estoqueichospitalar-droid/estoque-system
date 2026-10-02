@@ -25,17 +25,31 @@ function tetoArredondado(valor) {
 }
 
 // Regressão linear simples (mínimos quadrados) — a linha de tendência sobre
-// as barras de faturamento mensal.
-function regressaoLinear(valores) {
+// as barras de faturamento mensal. `xs` são os deslocamentos reais em meses
+// (não a posição da barra), pra a tendência não distorcer quando o usuário
+// esconde meses do meio do período.
+function regressaoLinear(xs, valores) {
   const n = valores.length;
-  const somaX = valores.reduce((s, _, i) => s + i, 0);
+  const somaX = xs.reduce((s, x) => s + x, 0);
   const somaY = valores.reduce((s, v) => s + v, 0);
-  const somaXY = valores.reduce((s, v, i) => s + i * v, 0);
-  const somaXX = valores.reduce((s, _, i) => s + i * i, 0);
+  const somaXY = valores.reduce((s, v, i) => s + xs[i] * v, 0);
+  const somaXX = xs.reduce((s, x) => s + x * x, 0);
   const denom = n * somaXX - somaX * somaX;
   const slope = denom !== 0 ? (n * somaXY - somaX * somaY) / denom : 0;
   const intercept = (somaY - slope * somaX) / n;
-  return { slope, intercept, fitted: valores.map((_, i) => intercept + slope * i) };
+  return { slope, intercept, fitted: xs.map((x) => intercept + slope * x) };
+}
+
+function numeroDoMes(mesChave) {
+  const [ano, mes] = mesChave.split('-').map(Number);
+  return ano * 12 + (mes - 1);
+}
+
+const ABREV_MES = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+
+function abreviarMes(mesChave) {
+  const [ano, mes] = mesChave.split('-').map(Number);
+  return `${ABREV_MES[mes - 1]}/${String(ano).slice(2)}`;
 }
 
 const MESES_NOME = [
@@ -54,39 +68,62 @@ function somarMeses(mesChave, quantidade) {
 /**
  * Ponto de equilíbrio em relação ao estoque: a partir da tendência de
  * faturamento mensal, em qual mês o faturamento de UM mês passaria a igualar
- * o valor hoje investido em estoque (índice fracionário na mesma escala de
- * meses usada pela regressão — index 0 é o primeiro mês importado).
+ * o valor hoje investido em estoque. `idx` e `ultimoOffset` estão na mesma
+ * escala da regressão (meses desde o primeiro mês selecionado).
  */
-function calcularPontoEquilibrio({ slope, intercept, n, valorTotalEstoque, ultimoMesChave }) {
+function calcularPontoEquilibrio({ slope, intercept, ultimoOffset, valorTotalEstoque, ultimoMesChave }) {
   if (valorTotalEstoque == null || slope <= 0) return null;
   const idx = (valorTotalEstoque - intercept) / slope;
-  if (idx <= n - 1) {
+  if (idx <= ultimoOffset) {
     return { jaAtingido: true, idx };
   }
-  const mesesAFrente = Math.ceil(idx - (n - 1));
+  const mesesAFrente = Math.ceil(idx - ultimoOffset);
   return { jaAtingido: false, idx, mesesAFrente, mesLabel: somarMeses(ultimoMesChave, mesesAFrente) };
 }
 
 export default function GraficoFaturamentoEstoque({ meses, valorTotalEstoque }) {
   const [tabela, setTabela] = useState(false);
+  // Guarda os meses ESCONDIDOS (não os escolhidos): um mês recém-importado ou
+  // recém-sincronizado aparece por padrão, sem o usuário precisar marcá-lo.
+  const [ocultos, setOcultos] = useState(() => new Set());
+
+  const mesesSel = useMemo(() => meses.filter((m) => !ocultos.has(m.mesChave)), [meses, ocultos]);
 
   const dados = useMemo(
-    () => meses.map((m) => ({ label: m.mesLabel, valor: m.resumo.totalVendas })),
-    [meses]
+    () => mesesSel.map((m) => ({ label: m.mesLabel, valor: m.resumo.totalVendas ?? 0 })),
+    [mesesSel]
   );
 
+  function alternarMes(mesChave) {
+    setOcultos((atual) => {
+      const novo = new Set(atual);
+      if (novo.has(mesChave)) novo.delete(mesChave);
+      else novo.add(mesChave);
+      return novo;
+    });
+  }
+
+  function mostrarUltimos(qtd) {
+    const visiveis = qtd == null ? meses : meses.slice(-qtd);
+    const chaves = new Set(visiveis.map((m) => m.mesChave));
+    setOcultos(new Set(meses.filter((m) => !chaves.has(m.mesChave)).map((m) => m.mesChave)));
+  }
+
   const temTendencia = dados.length >= 2;
+  const primeiroNumero = mesesSel[0] ? numeroDoMes(mesesSel[0].mesChave) : 0;
+  const offsets = mesesSel.map((m) => numeroDoMes(m.mesChave) - primeiroNumero);
+  const ultimoOffset = offsets[offsets.length - 1] ?? 0;
   const { fitted, slope, intercept } = temTendencia
-    ? regressaoLinear(dados.map((d) => d.valor))
+    ? regressaoLinear(offsets, dados.map((d) => d.valor))
     : { fitted: [], slope: 0, intercept: 0 };
 
   const pontoEquilibrio = temTendencia
     ? calcularPontoEquilibrio({
-        slope, intercept, n: dados.length, valorTotalEstoque, ultimoMesChave: meses[meses.length - 1]?.mesChave,
+        slope, intercept, ultimoOffset, valorTotalEstoque, ultimoMesChave: mesesSel[mesesSel.length - 1]?.mesChave,
       })
     : null;
 
-  if (dados.length === 0) {
+  if (meses.length === 0) {
     return (
       <div className="card">
         <h3>Faturamento vs. estoque</h3>
@@ -94,6 +131,50 @@ export default function GraficoFaturamentoEstoque({ meses, valorTotalEstoque }) 
           Importe os meses de vendas na aba <strong>Mix de Vendas</strong> pra ver o faturamento comparado ao
           valor investido em estoque.
         </div>
+      </div>
+    );
+  }
+
+  const seletorMeses = (
+    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginBottom: 12 }}>
+      <span style={{ fontSize: 11.5, color: 'var(--muted)', marginRight: 2 }}>Meses:</span>
+      {meses.map((m) => {
+        const ativo = !ocultos.has(m.mesChave);
+        return (
+          <button
+            key={m.mesChave}
+            type="button"
+            aria-pressed={ativo}
+            title={`${m.mesLabel} — ${ativo ? 'clique para esconder' : 'clique para mostrar'}`}
+            onClick={() => alternarMes(m.mesChave)}
+            style={{
+              padding: '3px 9px',
+              fontSize: 11.5,
+              borderRadius: 999,
+              border: '1px solid var(--azul)',
+              background: ativo ? 'var(--azul)' : 'transparent',
+              color: ativo ? '#fff' : 'var(--azul)',
+              cursor: 'pointer',
+            }}
+          >
+            {abreviarMes(m.mesChave)}
+          </button>
+        );
+      })}
+      <span style={{ width: 1, height: 16, background: 'var(--cinza-borda)', margin: '0 4px' }} />
+      <button type="button" className="btn" style={{ padding: '3px 9px', fontSize: 11.5 }} onClick={() => mostrarUltimos(null)}>Todos</button>
+      {meses.length > 3 && <button type="button" className="btn" style={{ padding: '3px 9px', fontSize: 11.5 }} onClick={() => mostrarUltimos(3)}>Últimos 3</button>}
+      {meses.length > 6 && <button type="button" className="btn" style={{ padding: '3px 9px', fontSize: 11.5 }} onClick={() => mostrarUltimos(6)}>Últimos 6</button>}
+      {meses.length > 12 && <button type="button" className="btn" style={{ padding: '3px 9px', fontSize: 11.5 }} onClick={() => mostrarUltimos(12)}>Últimos 12</button>}
+    </div>
+  );
+
+  if (dados.length === 0) {
+    return (
+      <div className="card">
+        <h3>Faturamento vs. estoque</h3>
+        {seletorMeses}
+        <div className="vazio" style={{ padding: '16px 0' }}>Selecione ao menos um mês acima pra ver o gráfico.</div>
       </div>
     );
   }
@@ -125,12 +206,13 @@ export default function GraficoFaturamentoEstoque({ meses, valorTotalEstoque }) 
   // equilíbrio previsto está longe demais pra caber no eixo visível.
   let projecao = null;
   if (pontoEquilibrio && !pontoEquilibrio.jaAtingido) {
-    const xBreak = M.left + (pontoEquilibrio.idx + 0.5) * bandaX;
+    const ultimoPonto = pontosTendencia[pontosTendencia.length - 1];
+    const xBreak = ultimoPonto.x + (pontoEquilibrio.idx - ultimoOffset) * bandaX;
     const dentroDoGrafico = xBreak <= W - M.right;
     const xFim = Math.min(xBreak, W - M.right);
-    const yFim = dentroDoGrafico ? yEstoque : y(intercept + slope * ((xFim - M.left) / bandaX - 0.5));
+    const yFim = dentroDoGrafico ? yEstoque : y(intercept + slope * (ultimoOffset + (xFim - ultimoPonto.x) / bandaX));
     projecao = {
-      de: pontosTendencia[pontosTendencia.length - 1],
+      de: ultimoPonto,
       para: { x: xFim, y: yFim },
       marcador: dentroDoGrafico,
     };
@@ -142,6 +224,8 @@ export default function GraficoFaturamentoEstoque({ meses, valorTotalEstoque }) 
       <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: -4, marginBottom: 14 }}>
         Faturamento mensal (Mix de Vendas) comparado ao valor investido em estoque hoje (custo) — mesma escala em R$.
       </p>
+
+      {seletorMeses}
 
       <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginBottom: 10, fontSize: 11.5, color: 'var(--muted)' }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

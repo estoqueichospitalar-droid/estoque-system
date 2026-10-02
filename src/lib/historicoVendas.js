@@ -30,6 +30,53 @@ export const MAX_MESES_LOCAIS = 6;
 // Escoamento — ver EscoamentoEstoque.jsx e alertas.js.
 const CHAVE_CODIGOS_VENDA_HISTORICA = 'ic_supra_codigos_venda_historica_v1';
 
+// Índice leve de TODOS os meses já importados (só cabeçalho + resumo, sem os
+// itens) — um registro por mês, poucos bytes. Existe porque o gráfico de
+// faturamento precisa mostrar todo o histórico, mas o detalhe item a item só
+// cabe em cache pros MAX_MESES_LOCAIS mais recentes. Alimentado pelo pull do
+// Supabase (todos os meses do servidor) e por cada importação local.
+export const CHAVE_RESUMOS_VENDAS = 'ic_supra_resumos_vendas_v1';
+
+function lerResumos() {
+  try {
+    const raw = localStorage.getItem(CHAVE_RESUMOS_VENDAS);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function cabecalhoDe(registro) {
+  return {
+    mesChave: registro.mesChave,
+    mesLabel: registro.mesLabel,
+    periodoInicio: registro.periodoInicio ?? null,
+    periodoFim: registro.periodoFim ?? null,
+    resumo: registro.resumo ?? {},
+    importadoEm: registro.importadoEm,
+  };
+}
+
+/** Substitui o índice inteiro (usado pelo pull, que enxerga todos os meses do servidor). */
+export function substituirResumosMeses(registros) {
+  const indice = {};
+  for (const r of registros) indice[r.mesChave] = cabecalhoDe(r);
+  salvarLocalComFallback(CHAVE_RESUMOS_VENDAS, indice);
+}
+
+/**
+ * Todos os meses conhecidos (índice leve + o que está no cache detalhado, que
+ * prevalece por ser mais recente quando divergem), do mais antigo ao mais
+ * novo. Não traz os itens — serve ao gráfico de faturamento.
+ */
+export function listarResumosMeses() {
+  const indice = lerResumos();
+  for (const mes of Object.values(ler())) indice[mes.mesChave] = cabecalhoDe(mes);
+  return Object.values(indice)
+    .filter((m) => m.mesChave && m.resumo)
+    .sort((a, b) => (a.mesChave < b.mesChave ? -1 : 1));
+}
+
 /** Mantém só os N meses mais recentes (por mesChave) — usado aqui e em src/lib/sync/pull.js. */
 export function podarParaLimiteLocal(obj) {
   const chaves = Object.keys(obj).sort();
@@ -112,6 +159,9 @@ export function salvarVendasMes(relatorioParsed, nomeArquivo) {
   pushVendasMes(registro);
   salvar(todos);
   registrarCodigosNoIndiceHistorico(relatorioParsed.itens.map((i) => i.codigo));
+  const indice = lerResumos();
+  indice[chave] = cabecalhoDe(registro);
+  salvarLocalComFallback(CHAVE_RESUMOS_VENDAS, indice);
   return registro;
 }
 
@@ -120,6 +170,9 @@ export function removerVendasMes(mesChave) {
   delete todos[mesChave];
   pushRemoverVendasMes(mesChave);
   salvar(todos);
+  const indice = lerResumos();
+  delete indice[mesChave];
+  salvarLocalComFallback(CHAVE_RESUMOS_VENDAS, indice);
 }
 
 /**

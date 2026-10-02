@@ -1,6 +1,6 @@
 import { getUltimoSnapshot, getSnapshotAnterior } from '../lib/historicoPedidos';
 import { gerarPainelAlertas } from '../lib/alertas';
-import { listarMesesImportados } from '../lib/historicoVendas';
+import { listarResumosMeses } from '../lib/historicoVendas';
 import AnaliseIA from './AnaliseIA';
 import GraficoFaturamentoEstoque from './GraficoFaturamentoEstoque';
 import EscoamentoEstoque from './EscoamentoEstoque';
@@ -60,7 +60,7 @@ export default function Dashboard({ snapshot }) {
         </div>
       </div>
 
-      <GraficoFaturamentoEstoque meses={listarMesesImportados()} valorTotalEstoque={resumo.valorTotalEstoque} />
+      <GraficoFaturamentoEstoque meses={listarResumosMeses()}valorTotalEstoque={resumo.valorTotalEstoque} />
 
       <EscoamentoEstoque itensEstoque={atual.itens} />
 

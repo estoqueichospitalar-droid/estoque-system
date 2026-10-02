@@ -20,6 +20,27 @@ export function chunk(itens, tamanho = 500) {
 }
 
 /**
+ * Lê TODAS as linhas de uma consulta, página a página. O PostgREST corta
+ * silenciosamente em 1000 linhas por chamada — sem paginar, quem puxa
+ * tabelas grandes (itens de venda de vários meses, ~10 mil produtos de
+ * config) recebe só o começo e cada usuário acaba vendo um histórico
+ * diferente. `montarConsulta` precisa devolver uma consulta NOVA a cada
+ * chamada e já ordenada por coluna única (ex: `.order('id')`), senão a
+ * paginação pode repetir ou pular linhas.
+ */
+export async function buscarTodasLinhas(montarConsulta, tamanhoPagina = 1000) {
+  const todas = [];
+  for (let inicio = 0; ; inicio += tamanhoPagina) {
+    const { data, error } = await montarConsulta().range(inicio, inicio + tamanhoPagina - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    todas.push(...data);
+    if (data.length < tamanhoPagina) break;
+  }
+  return todas;
+}
+
+/**
  * Insere um array grande em lotes SEQUENCIAIS (nunca em paralelo — o plano
  * free do Supabase tem limite de conexões simultâneas). Lança se algum lote
  * falhar; quem chama decide se isso é fatal ou só um aviso (ver src/lib/sync/push.js).
