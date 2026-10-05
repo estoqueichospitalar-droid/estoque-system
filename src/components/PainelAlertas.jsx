@@ -195,7 +195,10 @@ export default function PainelAlertas({ snapshot, selecionados, onAlternarSeleca
   const listaFiltrada = useMemo(() => {
     let lista = painel;
     if (filtroNivel !== 'TODOS') lista = lista.filter((i) => i.alerta.nivel === filtroNivel);
-    else lista = lista.filter((i) => i.alerta.nivel !== 'OK'); // "Todos" = tudo que precisa de atenção
+    // "Todos" = tudo que precisa de atenção — mas quem está buscando um
+    // produto específico quer achá-lo mesmo com estoque confortável (ex: pra
+    // incluir num pedido por conta própria), então a busca vale pro catálogo inteiro.
+    else if (!busca.trim()) lista = lista.filter((i) => i.alerta.nivel !== 'OK');
     if (filtroSetor.length > 0) lista = lista.filter((i) => filtroSetor.includes(i.setor));
     if (filtroAbc !== 'TODOS') lista = lista.filter((i) => i.curvaAbc === filtroAbc);
     if (busca.trim()) {
@@ -346,6 +349,12 @@ export default function PainelAlertas({ snapshot, selecionados, onAlternarSeleca
           style={{ marginLeft: 'auto', minWidth: 220 }}
         />
       </div>
+
+      {busca.trim() && filtroNivel === 'TODOS' && (
+        <p style={{ fontSize: 12, color: 'var(--muted)', margin: '4px 0 8px' }}>
+          Busca em todo o estoque importado, inclusive itens com estoque OK (que não aparecem na lista sem busca).
+        </p>
+      )}
 
       {gruposFiltrados.length === 0 && <div className="vazio">Nenhum item nesse filtro.</div>}
 
