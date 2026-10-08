@@ -6,7 +6,7 @@
 // com o que já tinha no localStorage.
 
 import { supabase, isSupabaseConfigured, buscarTodasLinhas } from '../supabaseClient';
-import { pushVendasMes } from './push';
+import { pushVendasMes, pushFornecedorUpsert, pushVinculoUpsert } from './push';
 import { CHAVE_CONFIG_PRODUTOS } from '../configProdutos';
 import { CHAVE_SNAPSHOTS, CHAVE_PEDIDOS } from '../historicoPedidos';
 import {
@@ -263,11 +263,65 @@ async function puxarIndiceCodigosVenda() {
   if (codigos.size > 0) registrarCodigosNoIndiceHistorico(codigos);
 }
 
-async function puxarFornecedores() {
-  const data = await buscarTodasLinhas(() => supabase.from('fornecedores').select('*').order('id'));
-  if (data.length === 0) return;
+function normalizarNome(nome) {
+  return String(nome ?? '').trim().toLowerCase();
+}
 
-  const local = lerLocal(CHAVE_FORNECEDORES, []);
+/**
+ * Fornecedores e vínculos produto↔fornecedor andam juntos porque o vínculo
+ * aponta pro id do fornecedor. Cada navegador cadastra a lista padrão de
+ * fornecedores por conta própria (ids aleatórios diferentes) quando o envio
+ * ao servidor falha ou ainda não existia — então, ao sincronizar:
+ *  - cópia local sem equivalente por id, mas com o MESMO NOME de um
+ *    fornecedor do servidor, é descartada e seus vínculos passam pro id do
+ *    servidor (senão cada usuário veria a lista duplicada);
+ *  - cópia local que o servidor não conhece de jeito nenhum é enviada.
+ */
+async function puxarFornecedoresEVinculos() {
+  const linhasF = await buscarTodasLinhas(() => supabase.from('fornecedores').select('*').order('id'));
+  const linhasV = await buscarTodasLinhas(() => supabase.from('produto_fornecedor').select('*').order('id'));
+
+  const idsRemotosF = new Set(linhasF.map((r) => r.id));
+  const idPorNomeRemoto = new Map();
+  for (const r of linhasF) {
+    const chave = normalizarNome(r.nome);
+    if (!idPorNomeRemoto.has(chave)) idPorNomeRemoto.set(chave, r.id);
+  }
+
+  const alias = new Map(); // id local descartado -> id do servidor
+  const fornecedoresPendentes = [];
+  const locaisMantidos = [];
+  for (const f of lerLocal(CHAVE_FORNECEDORES, [])) {
+    if (idsRemotosF.has(f.id)) { locaisMantidos.push(f); continue; }
+    const idDoServidor = idPorNomeRemoto.get(normalizarNome(f.nome));
+    if (idDoServidor) { alias.set(f.id, idDoServidor); continue; }
+    locaisMantidos.push(f);
+    fornecedoresPendentes.push(f);
+  }
+  mesclarFornecedores(linhasF, locaisMantidos);
+
+  const idsRemotosV = new Set(linhasV.map((r) => r.id));
+  const parRemoto = new Set(linhasV.map((r) => `${r.codigo}|${r.fornecedor_id}`));
+  const vinculosPendentes = [];
+  const vinculosMantidos = [];
+  const paresVistos = new Set();
+  for (const v0 of lerLocal(CHAVE_VINCULOS, [])) {
+    const v = alias.has(v0.fornecedorId) ? { ...v0, fornecedorId: alias.get(v0.fornecedorId) } : v0;
+    if (idsRemotosV.has(v.id)) { vinculosMantidos.push(v); continue; }
+    const par = `${v.codigo}|${v.fornecedorId}`;
+    if (parRemoto.has(par) || paresVistos.has(par)) continue; // o servidor (ou outra cópia local) já tem esse par
+    paresVistos.add(par);
+    vinculosMantidos.push(v);
+    vinculosPendentes.push(v);
+  }
+  mesclarVinculos(linhasV, vinculosMantidos);
+
+  // Sequencial e fornecedores antes dos vínculos (chave estrangeira).
+  for (const f of fornecedoresPendentes) await pushFornecedorUpsert(f);
+  for (const v of vinculosPendentes) await pushVinculoUpsert(v);
+}
+
+function mesclarFornecedores(data, local) {
   const porId = new Map(local.map((f) => [f.id, f]));
   for (const row of data) {
     const remoto = {
@@ -294,11 +348,7 @@ async function puxarFornecedores() {
   salvarLocal(CHAVE_FORNECEDORES, Array.from(porId.values()));
 }
 
-async function puxarVinculosProdutoFornecedor() {
-  const data = await buscarTodasLinhas(() => supabase.from('produto_fornecedor').select('*').order('id'));
-  if (data.length === 0) return;
-
-  const local = lerLocal(CHAVE_VINCULOS, []);
+function mesclarVinculos(data, local) {
   const porId = new Map(local.map((v) => [v.id, v]));
   for (const row of data) {
     const remoto = {
@@ -331,8 +381,7 @@ export async function pullTudoDoSupabase() {
     puxarPedidos(),
     puxarVendas(),
     puxarIndiceCodigosVenda(),
-    puxarFornecedores(),
-    puxarVinculosProdutoFornecedor(),
+    puxarFornecedoresEVinculos(),
   ]);
   for (const r of resultados) {
     if (r.status === 'rejected') {

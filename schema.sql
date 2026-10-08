@@ -107,6 +107,10 @@ alter table fornecedores add column if not exists limite_credito numeric(12,2);
 alter table fornecedores add column if not exists especialidade text;
 alter table fornecedores add column if not exists setor text;
 
+-- Um nome de fornecedor só existe uma vez (sem diferenciar maiúsculas/minúsculas).
+-- Evita duplicar a lista padrão quando vários navegadores sincronizam ao mesmo tempo.
+create unique index if not exists uq_fornecedores_nome on fornecedores (lower(trim(nome)));
+
 -- Vínculo produto↔fornecedor: custo e disponibilidade são por PAR, não por
 -- produto — o mesmo item pode custar diferente e estar disponível em um
 -- fornecedor e indisponível em outro. `disponivel = false` é o que permite a
