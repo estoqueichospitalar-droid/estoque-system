@@ -6,6 +6,7 @@ import {
   editarPedidoComDestinos,
 } from '../lib/historicoPedidos';
 import { listarFornecedores } from '../lib/fornecedores';
+import { gerarOrdemCompraPdf, baixarPdf } from '../lib/ordemCompraPdf';
 
 const MANUAL = '__manual__';
 
@@ -195,6 +196,36 @@ export default function HistoricoPedidos({ snapshot }) {
   const [aberto, setAberto] = useState(null);
   const [editando, setEditando] = useState(null);
   const [filtroStatus, setFiltroStatus] = useState('TODOS');
+  const [emitindoPdfId, setEmitindoPdfId] = useState(null);
+
+  /** Gera o PDF do pedido como está agora (com as edições) — mesmo layout da Ordem de Compra, uma folha só do fornecedor. */
+  async function emitirPdf(pedido) {
+    setEmitindoPdfId(pedido.id);
+    try {
+      const logoResp = await fetch('/logo-ic.png');
+      const logoBytes = new Uint8Array(await logoResp.arrayBuffer());
+      const dataCriacao = new Date(pedido.criadoEm).toLocaleDateString('pt-BR');
+      const dataEdicao = pedido.atualizadoEm ? new Date(pedido.atualizadoEm).toLocaleDateString('pt-BR') : null;
+      const bytes = await gerarOrdemCompraPdf({
+        grupos: [{
+          fornecedor: pedido.fornecedor,
+          itens: pedido.itens.map((i) => ({
+            codigo: i.codigo, descricao: i.descricao, unidade: i.unidade, qtd: i.qtdPedida, custoUnit: i.custoUnit,
+          })),
+        }],
+        referencia: `Ordem de compra — ${dataCriacao}${dataEdicao && dataEdicao !== dataCriacao ? ` (atualizada em ${dataEdicao})` : ''}`,
+        logoBytes,
+        observacoes: pedido.observacoes || null,
+      });
+      const slug = pedido.fornecedor.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase();
+      baixarPdf(bytes, `ordem-de-compra-${slug || 'pedido'}-${Date.now()}.pdf`);
+    } catch (e) {
+      console.error(e);
+      window.alert('Não foi possível gerar o PDF. Veja o console para detalhes.');
+    } finally {
+      setEmitindoPdfId(null);
+    }
+  }
 
   function recarregar() {
     setPedidos(listarPedidos());
@@ -225,8 +256,15 @@ export default function HistoricoPedidos({ snapshot }) {
       'OK = juntar · Cancelar = manter como pedido separado.'
     ));
     setEditando(null);
-    recarregar();
-    if (resultado?.resumo?.length) window.alert(resultado.resumo.join('\n'));
+    const atualizados = listarPedidos();
+    setPedidos(atualizados);
+    if (resultado?.resumo?.length) {
+      window.alert(`${resultado.resumo.join('\n')}\n\nOs pedidos novos ou alterados têm o botão "Emitir PDF" no histórico.`);
+    }
+    const editado = atualizados.find((p) => p.id === pedidoId);
+    if (editado && editado.status !== 'cancelado' && window.confirm('Edição salva. Emitir o PDF atualizado deste pedido agora?')) {
+      emitirPdf(editado);
+    }
   }
 
   const contagensStatus = useMemo(() => {
@@ -274,6 +312,16 @@ export default function HistoricoPedidos({ snapshot }) {
               </div>
               <div className="linha-flex">
                 <span className="tag" style={{ color: s.cor, background: s.fundo }}>{s.label}</span>
+                {pedido.status !== 'cancelado' && (
+                  <button
+                    className="btn pequeno"
+                    disabled={emitindoPdfId === pedido.id}
+                    title="Gera o PDF do pedido como ele está agora (use depois de editar)"
+                    onClick={() => emitirPdf(pedido)}
+                  >
+                    {emitindoPdfId === pedido.id ? 'Gerando…' : '📄 Emitir PDF'}
+                  </button>
+                )}
                 {pedido.status !== 'cancelado' && (
                   <button
                     className="btn secundario pequeno"
