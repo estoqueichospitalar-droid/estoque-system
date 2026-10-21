@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { extrairTextoPdf } from '../lib/pdfExtract';
 import { parseRelatorioEstoque, unificarSnapshot } from '../lib/parsers/estoqueParser';
 import { salvarSnapshot } from '../lib/historicoPedidos';
@@ -79,6 +79,7 @@ export default function ImportarEstoque({ onSnapshotGerado }) {
     setResultados((r) => ({ ...r, [chave]: null }));
     setAnaliseGerada(null);
     setErroGeral(null);
+    geradoRef.current = false;
     try {
       const texto = await extrairTextoPdf(file, (atual, total) =>
         setProgresso((p) => ({ ...p, [chave]: { atual, total } }))
@@ -94,13 +95,19 @@ export default function ImportarEstoque({ onSnapshotGerado }) {
 
   const todosProcessados = TIPOS.every((t) => status[t.chave] === 'ok');
   const totalAvisos = Object.values(resultados).reduce((s, r) => s + (r?.avisos?.length ?? 0), 0);
+  // Positivo e zerado prontos, negativo não enviado: o relatório de negativos
+  // pode nem existir quando não há item negativo — deixa gerar assim mesmo.
+  const semNegativoPronto = status.positivo === 'ok' && status.zerado === 'ok'
+    && status.negativo !== 'ok' && status.negativo !== 'processando';
 
-  // A análise é gerada sozinha assim que os 3 relatórios terminam de
-  // processar — não depende de um clique. O avanço pra aba de Alertas é
-  // adiado um instante só pra dar tempo da mensagem de sucesso aparecer,
-  // em vez de sumir da tela antes de qualquer feedback visual.
-  useEffect(() => {
-    if (!todosProcessados || analiseGerada) return;
+  // Sem cleanup de propósito: o avanço pra aba de Alertas é um setTimeout, e
+  // a própria geração muda `analiseGerada` (dependência do efeito) — um
+  // cleanup cancelaria esse timer antes de disparar e o app seguiria
+  // mostrando o snapshot antigo. A trava por ref evita gerar duas vezes.
+  const geradoRef = useRef(false);
+  const gerarAnalise = useCallback(() => {
+    if (geradoRef.current) return;
+    geradoRef.current = true;
     try {
       const snapshot = unificarSnapshot({
         positivo: resultados.positivo,
@@ -109,20 +116,26 @@ export default function ImportarEstoque({ onSnapshotGerado }) {
       });
       const registro = salvarSnapshot(snapshot);
       setAnaliseGerada(registro);
-      const timer = setTimeout(() => onSnapshotGerado(registro), 1100);
-      return () => clearTimeout(timer);
+      setTimeout(() => onSnapshotGerado(registro), 1100);
     } catch (e) {
+      geradoRef.current = false;
       console.error(e);
       setErroGeral('Não foi possível gerar a análise. Confira os PDFs importados.');
     }
-  }, [todosProcessados, analiseGerada, resultados, onSnapshotGerado]);
+  }, [resultados, onSnapshotGerado]);
+
+  // Com os 3 relatórios processados a análise sai sozinha, sem clique.
+  useEffect(() => {
+    if (todosProcessados && !analiseGerada) gerarAnalise();
+  }, [todosProcessados, analiseGerada, gerarAnalise]);
 
   return (
     <div>
       <h2>Importar estoque atual</h2>
       <p className="subtitulo-pagina">
         Importe os três relatórios do sistema Net Use (positivo, negativo e zerado). Cada importação gera um novo
-        snapshot com data e hora, comparável ao anterior.
+        snapshot com data e hora, comparável ao anterior. Se não houver itens negativos, dá para gerar a análise só
+        com o positivo e o zerado.
       </p>
 
       <div className="dropzone-grid">
@@ -175,6 +188,15 @@ export default function ImportarEstoque({ onSnapshotGerado }) {
       )}
       {!analiseGerada && todosProcessados && !erroGeral && (
         <div className="status-arquivo pendente" style={{ marginBottom: 10 }}>Gerando análise…</div>
+      )}
+      {!analiseGerada && semNegativoPronto && !erroGeral && (
+        <div className="status-arquivo pendente" style={{ marginBottom: 10 }}>
+          Falta o relatório de <strong>estoque negativo</strong>. Se hoje não há itens negativos, gere a análise assim
+          mesmo — nenhum item será marcado como negativo nesta importação.{' '}
+          <button className="btn" onClick={gerarAnalise} style={{ marginLeft: 8 }}>
+            Gerar análise sem negativos
+          </button>
+        </div>
       )}
     </div>
   );
