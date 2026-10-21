@@ -34,13 +34,24 @@ function demaisFornecedores(setorDoItem, jaVinculadosIds, fornecedores) {
   return { doSetor, outros };
 }
 
-export default function OrdemCompra({ selecionados, onRemoverSelecao, onPedidoCriado }) {
+export default function OrdemCompra({
+  selecionados, onRemoverSelecao, onPedidoCriado,
+  campos, onCampos, observacoes, onObservacoes,
+  rascunhoSalvoEm, onSalvarRascunho, onDescartarRascunho,
+}) {
   const itens = Object.values(selecionados);
   const [vinculos, setVinculos] = useState(() => listarVinculos());
   const [fornecedores] = useState(() => listarFornecedores());
-  const [campos, setCampos] = useState(() => {
+  const [gerando, setGerando] = useState(false);
+  const [fornecedorUnico, setFornecedorUnico] = useState('');
+  const [somenteSemFornecedor, setSomenteSemFornecedor] = useState(false);
+
+  // Valor inicial de cada item (melhor fornecedor vinculado, custo, quantidade
+  // sugerida). O que o usuário editou fica em `campos` (vive em App.jsx e é
+  // gravado como rascunho) e prevalece sobre isto.
+  const padroes = useMemo(() => {
     const iniciais = {};
-    for (const item of itens) {
+    for (const item of Object.values(selecionados)) {
       const cfg = getConfigProduto(item.codigo);
       const melhor = opcoesFornecedor(item.codigo, vinculos, fornecedores)[0];
       iniciais[item.codigo] = {
@@ -51,12 +62,43 @@ export default function OrdemCompra({ selecionados, onRemoverSelecao, onPedidoCr
       };
     }
     return iniciais;
-  });
-  const [gerando, setGerando] = useState(false);
-  const [observacoes, setObservacoes] = useState('');
+  }, [selecionados, vinculos, fornecedores]);
+
+  const campoDoCodigo = (codigo) => ({ ...padroes[codigo], ...(campos[codigo] ?? {}) });
+
+  function mesclarCampos(codigo, parcial) {
+    onCampos((c) => ({ ...c, [codigo]: { ...padroes[codigo], ...(c[codigo] ?? {}), ...parcial } }));
+  }
 
   function atualizarCampo(codigo, campo, valor) {
-    setCampos((c) => ({ ...c, [codigo]: { ...c[codigo], [campo]: valor } }));
+    mesclarCampos(codigo, { [campo]: valor });
+  }
+
+  /**
+   * "Fornecedor único": a ordem inteira vai pra um fornecedor só. Não cria
+   * vínculo produto↔fornecedor (isso é decisão item a item, no seletor de
+   * cada linha) — só define pra quem esta ordem é emitida. Custo e quantidade
+   * de cada item ficam como estão.
+   */
+  function aplicarFornecedorUnico() {
+    if (!fornecedorUnico) return;
+    const alvo = itens.filter((item) => !somenteSemFornecedor || !campoDoCodigo(item.codigo).fornecedorId);
+    if (alvo.length === 0) {
+      window.alert('Todos os itens já têm fornecedor. Desmarque "Só nos itens sem fornecedor" para trocar o de todos.');
+      return;
+    }
+    const trocando = alvo.filter((item) => {
+      const c = campoDoCodigo(item.codigo);
+      return c.fornecedorId && c.fornecedorId !== fornecedorUnico;
+    }).length;
+    if (trocando > 0 && !window.confirm(`${trocando} item(ns) já têm outro fornecedor e serão trocados. Continuar?`)) return;
+    onCampos((c) => {
+      const novo = { ...c };
+      for (const item of alvo) {
+        novo[item.codigo] = { ...padroes[item.codigo], ...(c[item.codigo] ?? {}), fornecedorId: fornecedorUnico, fornecedorTexto: '' };
+      }
+      return novo;
+    });
   }
 
   /**
@@ -71,14 +113,11 @@ export default function OrdemCompra({ selecionados, onRemoverSelecao, onPedidoCr
     const vinculosAtualizados = listarVinculos();
     setVinculos(vinculosAtualizados);
     const proximo = opcoesFornecedor(codigo, vinculosAtualizados, fornecedores)[0];
-    setCampos((c) => ({
-      ...c,
-      [codigo]: {
-        ...c[codigo],
-        fornecedorId: proximo?.fornecedor.id ?? null,
-        custoUnit: proximo ? (proximo.vinculo.custoUnitario ?? c[codigo].custoUnit) : c[codigo].custoUnit,
-      },
-    }));
+    const custoAtual = campoDoCodigo(codigo).custoUnit;
+    mesclarCampos(codigo, {
+      fornecedorId: proximo?.fornecedor.id ?? null,
+      custoUnit: proximo ? (proximo.vinculo.custoUnitario ?? custoAtual) : custoAtual,
+    });
     window.alert(
       proximo
         ? `Marcado como indisponível. Reatribuído para "${proximo.fornecedor.nome}" (o resto do pedido anterior não é afetado).`
@@ -88,8 +127,8 @@ export default function OrdemCompra({ selecionados, onRemoverSelecao, onPedidoCr
 
   const grupos = useMemo(() => {
     const mapa = new Map();
-    for (const item of itens) {
-      const c = campos[item.codigo] ?? {};
+    for (const item of Object.values(selecionados)) {
+      const c = campoDoCodigo(item.codigo);
       const fornecedorCadastrado = c.fornecedorId ? fornecedores.find((f) => f.id === c.fornecedorId) : null;
       const nomeFornecedor = fornecedorCadastrado?.nome ?? (c.fornecedorTexto?.trim() || 'A definir');
       if (!mapa.has(nomeFornecedor)) mapa.set(nomeFornecedor, { itens: [], fornecedorCadastrado });
@@ -103,7 +142,7 @@ export default function OrdemCompra({ selecionados, onRemoverSelecao, onPedidoCr
       });
     }
     return Array.from(mapa.entries()).map(([fornecedor, dados]) => ({ fornecedor, ...dados }));
-  }, [itens, campos, fornecedores]);
+  }, [selecionados, campos, padroes, fornecedores]);
 
   const valorTotal = grupos.reduce(
     (s, g) => s + g.itens.reduce((s2, i) => s2 + i.qtd * i.custoUnit, 0),
@@ -117,7 +156,7 @@ export default function OrdemCompra({ selecionados, onRemoverSelecao, onPedidoCr
       // Fornecedores), guarda como preferência futura do produto — se já veio
       // do cadastro, o cadastro em si já é a fonte da verdade, não precisa duplicar.
       for (const item of itens) {
-        const c = campos[item.codigo];
+        const c = campoDoCodigo(item.codigo);
         if (!c?.fornecedorId && c?.fornecedorTexto?.trim()) {
           salvarConfigProduto(item.codigo, { fornecedor: c.fornecedorTexto.trim() });
         }
@@ -169,6 +208,26 @@ export default function OrdemCompra({ selecionados, onRemoverSelecao, onPedidoCr
         Ajuste quantidade, custo e fornecedor de cada item. O PDF final é segmentado por fornecedor.
       </p>
 
+      <div className="card" style={{ marginBottom: 12, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
+        <strong style={{ fontSize: 13 }}>Fornecedor único</strong>
+        <select value={fornecedorUnico} onChange={(e) => setFornecedorUnico(e.target.value)} style={{ minWidth: 240 }}>
+          <option value="">Escolha o fornecedor da ordem inteira…</option>
+          {fornecedores.filter((f) => f.ativo).sort((a, b) => a.nome.localeCompare(b.nome)).map((f) => (
+            <option key={f.id} value={f.id}>{f.nome}</option>
+          ))}
+        </select>
+        <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+          <input type="checkbox" checked={somenteSemFornecedor} onChange={(e) => setSomenteSemFornecedor(e.target.checked)} />
+          Só nos itens sem fornecedor
+        </label>
+        <button className="btn" disabled={!fornecedorUnico} onClick={aplicarFornecedorUnico}>
+          Aplicar a todos os itens ({itens.length})
+        </button>
+        <span style={{ fontSize: 11, color: 'var(--muted)', flexBasis: '100%' }}>
+          Preenche o fornecedor de todas as linhas de uma vez. Custo e quantidade de cada item não mudam, e não cria vínculo produto↔fornecedor.
+        </span>
+      </div>
+
       <table>
         <thead>
           <tr>
@@ -183,7 +242,7 @@ export default function OrdemCompra({ selecionados, onRemoverSelecao, onPedidoCr
         </thead>
         <tbody>
           {itens.map((item) => {
-            const c = campos[item.codigo] ?? {};
+            const c = campoDoCodigo(item.codigo);
             const subtotal = (Number(c.qtd) || 0) * (Number(c.custoUnit) || 0);
             const opcoes = opcoesFornecedor(item.codigo, vinculos, fornecedores);
             const jaVinculadosIds = new Set(opcoes.map((o) => o.fornecedor.id));
@@ -213,14 +272,10 @@ export default function OrdemCompra({ selecionados, onRemoverSelecao, onPedidoCr
                       const fornecedorId = e.target.value;
                       const jaVinculado = opcoes.find((o) => o.fornecedor.id === fornecedorId);
                       if (jaVinculado) {
-                        setCampos((cc) => ({
-                          ...cc,
-                          [item.codigo]: {
-                            ...cc[item.codigo],
-                            fornecedorId,
-                            custoUnit: jaVinculado.vinculo.custoUnitario ?? cc[item.codigo].custoUnit,
-                          },
-                        }));
+                        mesclarCampos(item.codigo, {
+                          fornecedorId,
+                          custoUnit: jaVinculado.vinculo.custoUnitario ?? c.custoUnit,
+                        });
                       } else {
                         // Fornecedor cadastrado mas ainda sem vínculo com esse
                         // produto — cria o vínculo na hora, com o custo já
@@ -320,17 +375,29 @@ export default function OrdemCompra({ selecionados, onRemoverSelecao, onPedidoCr
         <h3>Observações</h3>
         <textarea
           value={observacoes}
-          onChange={(e) => setObservacoes(e.target.value)}
+          onChange={(e) => onObservacoes(e.target.value)}
           placeholder="Descrição livre — combinação com o fornecedor, urgência, prazo de entrega, etc. Entra no PDF e fica salva no histórico do pedido."
           rows={3}
           style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit' }}
         />
       </div>
 
-      <div className="rodape-acoes">
+      <div className="rodape-acoes" style={{ flexWrap: 'wrap', gap: 8 }}>
         <button className="btn" disabled={gerando} onClick={handleGerarPdf}>
           {gerando ? 'Gerando PDF…' : '📄 Gerar PDF da ordem de compra'}
         </button>
+        <button className="btn secundario" onClick={onSalvarRascunho}>💾 Salvar rascunho</button>
+        <button
+          className="btn secundario"
+          onClick={() => { if (window.confirm('Descartar esta ordem em andamento (itens, quantidades, fornecedores e observações)?')) onDescartarRascunho(); }}
+        >
+          Descartar rascunho
+        </button>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+          {rascunhoSalvoEm
+            ? `Rascunho salvo automaticamente às ${new Date(rascunhoSalvoEm).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} (neste navegador)`
+            : 'O rascunho é salvo automaticamente neste navegador'}
+        </span>
       </div>
     </div>
   );

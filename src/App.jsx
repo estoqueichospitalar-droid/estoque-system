@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import ImportarEstoque from './components/ImportarEstoque';
 import Dashboard from './components/Dashboard';
@@ -13,6 +13,7 @@ import { gerarPainelAlertas } from './lib/alertas';
 import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
 import { pullTudoDoSupabase } from './lib/sync/pull';
 import { importarListaFornecedoresPadrao } from './lib/fornecedores';
+import { lerRascunho, salvarRascunho, limparRascunho } from './lib/rascunhoOrdem';
 
 const ABAS = [
   { chave: 'dashboard', label: 'Visão Geral' },
@@ -27,7 +28,15 @@ const ABAS = [
 export default function App() {
   const [aba, setAba] = useState('dashboard');
   const [snapshot, setSnapshot] = useState(() => getUltimoSnapshot());
-  const [selecionados, setSelecionados] = useState({}); // { [codigo]: itemComAlerta }
+  // Rascunho da ordem de compra: lido uma vez na abertura e regravado a cada
+  // alteração (ver efeito de autosave abaixo). Os campos da ordem (quantidade,
+  // custo, fornecedor, observações) moram aqui, e não dentro de OrdemCompra,
+  // pra não se perderem quando a aba é trocada.
+  const [rascunhoInicial] = useState(() => lerRascunho());
+  const [selecionados, setSelecionados] = useState(() => rascunhoInicial?.selecionados ?? {}); // { [codigo]: itemComAlerta }
+  const [camposOrdem, setCamposOrdem] = useState(() => rascunhoInicial?.campos ?? {});
+  const [observacoesOrdem, setObservacoesOrdem] = useState(() => rascunhoInicial?.observacoes ?? '');
+  const [rascunhoSalvoEm, setRascunhoSalvoEm] = useState(() => rascunhoInicial?.atualizadoEm ?? null);
   // Só existe sincronização quando o Supabase está configurado — sem isso,
   // o app segue 100% em modo local, exatamente como antes.
   const [sincronizando, setSincronizando] = useState(() => isSupabaseConfigured());
@@ -90,6 +99,27 @@ export default function App() {
     importarListaFornecedoresPadrao();
   }, []);
 
+  const primeiraRodadaAutosave = useRef(true);
+  useEffect(() => {
+    if (primeiraRodadaAutosave.current) { primeiraRodadaAutosave.current = false; return; }
+    const timer = setTimeout(() => {
+      setRascunhoSalvoEm(salvarRascunho({ selecionados, campos: camposOrdem, observacoes: observacoesOrdem }));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [selecionados, camposOrdem, observacoesOrdem]);
+
+  function salvarRascunhoAgora() {
+    setRascunhoSalvoEm(salvarRascunho({ selecionados, campos: camposOrdem, observacoes: observacoesOrdem }));
+  }
+
+  function descartarRascunho() {
+    setSelecionados({});
+    setCamposOrdem({});
+    setObservacoesOrdem('');
+    setRascunhoSalvoEm(null);
+    limparRascunho();
+  }
+
   function handleLogout() {
     supabase.auth.signOut();
     setAba('dashboard');
@@ -101,9 +131,20 @@ export default function App() {
     [painelAtual]
   );
 
+  // Estoque novo muda saldo e nível de alerta — os itens da ordem em andamento
+  // são atualizados com os dados do snapshot novo (quantidades, custos e
+  // fornecedores digitados ficam). Item que não existe mais no estoque sai.
   function handleSnapshotGerado(novoSnapshot) {
     setSnapshot(novoSnapshot);
-    setSelecionados({});
+    setSelecionados((atuais) => {
+      if (Object.keys(atuais).length === 0) return {};
+      const porCodigo = new Map(gerarPainelAlertas(novoSnapshot.itens).map((i) => [i.codigo, i]));
+      const atualizados = {};
+      for (const codigo of Object.keys(atuais)) {
+        if (porCodigo.has(codigo)) atualizados[codigo] = porCodigo.get(codigo);
+      }
+      return atualizados;
+    });
     setAba('alertas');
   }
 
@@ -184,7 +225,14 @@ export default function App() {
               <OrdemCompra
                 selecionados={selecionados}
                 onRemoverSelecao={removerSelecao}
-                onPedidoCriado={() => setSelecionados({})}
+                onPedidoCriado={descartarRascunho}
+                campos={camposOrdem}
+                onCampos={setCamposOrdem}
+                observacoes={observacoesOrdem}
+                onObservacoes={setObservacoesOrdem}
+                rascunhoSalvoEm={rascunhoSalvoEm}
+                onSalvarRascunho={salvarRascunhoAgora}
+                onDescartarRascunho={descartarRascunho}
               />
             )}
             {aba === 'historico' && <HistoricoPedidos snapshot={snapshot} />}
