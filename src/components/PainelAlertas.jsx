@@ -9,7 +9,17 @@ function fmtMoeda(v) {
   return `R$ ${(v ?? 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-const COR_CURVA_ABC = { A: 'var(--vermelho)', B: 'var(--amarelo)', C: 'var(--muted)' };
+/** Minúsculas e sem acento: o cadastro vem sem acento ("HIPODERMICA"), mas quem busca digita "hipodérmica". */
+function normalizarTexto(t) {
+  return String(t ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+}
+
+/** "esparadrapo + missner" -> ["esparadrapo", "missner"]: o item precisa conter TODOS os termos. */
+function termosDeBusca(busca) {
+  return normalizarTexto(busca).replace(/[()]/g, ' ').split(/[\s+;]+/).filter(Boolean);
+}
+
+const COR_CURVA_ABC ={ A: 'var(--vermelho)', B: 'var(--amarelo)', C: 'var(--muted)' };
 
 function TagAbc({ classe }) {
   return (
@@ -192,24 +202,40 @@ export default function PainelAlertas({ snapshot, selecionados, onAlternarSeleca
     return SETORES.filter((s) => presentes.has(s));
   }, [painel]);
 
+  const termosBusca = useMemo(() => termosDeBusca(busca), [busca]);
+  const textoPorItem = useMemo(
+    () => new Map(painel.map((i) => [i, normalizarTexto(`${i.codigo} ${i.descricao}`)])),
+    [painel]
+  );
+
   const listaFiltrada = useMemo(() => {
     let lista = painel;
     if (filtroNivel !== 'TODOS') lista = lista.filter((i) => i.alerta.nivel === filtroNivel);
     // "Todos" = tudo que precisa de atenção — mas quem está buscando um
     // produto específico quer achá-lo mesmo com estoque confortável (ex: pra
     // incluir num pedido por conta própria), então a busca vale pro catálogo inteiro.
-    else if (!busca.trim()) lista = lista.filter((i) => i.alerta.nivel !== 'OK');
+    else if (termosBusca.length === 0) lista = lista.filter((i) => i.alerta.nivel !== 'OK');
     if (filtroSetor.length > 0) lista = lista.filter((i) => filtroSetor.includes(i.setor));
     if (filtroAbc !== 'TODOS') lista = lista.filter((i) => i.curvaAbc === filtroAbc);
-    if (busca.trim()) {
-      const b = busca.trim().toLowerCase();
-      lista = lista.filter((i) => i.descricao.toLowerCase().includes(b) || i.codigo.includes(b));
+    if (termosBusca.length > 0) {
+      lista = lista.filter((i) => {
+        const texto = textoPorItem.get(i);
+        return termosBusca.every((t) => texto.includes(t));
+      });
     }
     if (ordenacao === 'FATURAMENTO') {
       lista = [...lista].sort((a, b) => (b.vendaRecente?.totVendas ?? 0) - (a.vendaRecente?.totVendas ?? 0));
     }
     return lista;
-  }, [painel, filtroNivel, filtroSetor, filtroAbc, busca, ordenacao]);
+  }, [painel, filtroNivel, filtroSetor, filtroAbc, termosBusca, textoPorItem, ordenacao]);
+
+  // Quando a busca de vários termos não acha nada, mostra quais termos não
+  // existem em NENHUM item — costuma ser uma palavra escrita diferente do
+  // cadastro (ex: "13mm" quando o cadastro diz "13X0,45").
+  const termosSemResultado = useMemo(() => {
+    if (termosBusca.length === 0 || listaFiltrada.length > 0) return [];
+    return termosBusca.filter((t) => !painel.some((i) => textoPorItem.get(i).includes(t)));
+  }, [termosBusca, listaFiltrada, painel, textoPorItem]);
 
   // Agrupa por setor ANTES de paginar — cada setor revela sua própria lista
   // em blocos, com seu próprio "carregar mais" (ver render abaixo). Assim
@@ -343,20 +369,31 @@ export default function PainelAlertas({ snapshot, selecionados, onAlternarSeleca
 
         <input
           type="text"
-          placeholder="Buscar por código ou descrição…"
+          placeholder="Buscar: código ou termos (ex: esparadrapo + missner)"
+          title="Use vários termos, separados por espaço ou +. O item precisa conter todos. Não diferencia acento nem maiúscula."
           value={busca}
           onChange={(e) => setBusca(e.target.value)}
           style={{ marginLeft: 'auto', minWidth: 220 }}
         />
       </div>
 
-      {busca.trim() && filtroNivel === 'TODOS' && (
+      {termosBusca.length > 0 && filtroNivel === 'TODOS' && (
         <p style={{ fontSize: 12, color: 'var(--muted)', margin: '4px 0 8px' }}>
           Busca em todo o estoque importado, inclusive itens com estoque OK (que não aparecem na lista sem busca).
+          {termosBusca.length > 1 && ' O item precisa conter todos os termos.'}
         </p>
       )}
 
-      {gruposFiltrados.length === 0 && <div className="vazio">Nenhum item nesse filtro.</div>}
+      {gruposFiltrados.length === 0 && (
+        <div className="vazio">
+          Nenhum item nesse filtro.
+          {termosSemResultado.length > 0 && (
+            <div style={{ marginTop: 6, fontSize: 12 }}>
+              Nenhum produto contém: <strong>{termosSemResultado.join(', ')}</strong> — confira como está escrito no cadastro.
+            </div>
+          )}
+        </div>
+      )}
 
       {gruposFiltrados.map(([setor, itensDoSetorFiltrados]) => {
         const aberto = !setoresFechados.has(setor);

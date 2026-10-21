@@ -6,7 +6,7 @@
 // com o que já tinha no localStorage.
 
 import { supabase, isSupabaseConfigured, buscarTodasLinhas } from '../supabaseClient';
-import { pushVendasMes, pushFornecedorUpsert, pushVinculoUpsert } from './push';
+import { pushVendasMes, pushSnapshot, pushFornecedorUpsert, pushVinculoUpsert } from './push';
 import { CHAVE_CONFIG_PRODUTOS } from '../configProdutos';
 import { CHAVE_SNAPSHOTS, CHAVE_PEDIDOS } from '../historicoPedidos';
 import {
@@ -66,6 +66,21 @@ async function puxarSnapshots() {
     .order('criado_em', { ascending: false })
     .limit(MAX_SNAPSHOTS_LOCAIS);
   if (error) throw error;
+
+  // Import de estoque que só existe neste navegador (o envio ao servidor
+  // falhou — sessão expirada, rede, aba fechada no meio): sobe agora. Sem
+  // isso o estoque novo fica visível só pra quem importou, e todo mundo
+  // continua vendo o snapshot antigo do servidor.
+  const maisNovoLocal = lerLocal(CHAVE_SNAPSHOTS, [])
+    .filter((s) => s?.id && s.itens?.length)
+    .sort((a, b) => new Date(b.criadoEm).getTime() - new Date(a.criadoEm).getTime())[0];
+  const maisNovoRemoto = snaps?.[0];
+  if (maisNovoLocal && (!maisNovoRemoto
+    || new Date(maisNovoLocal.criadoEm).getTime() > new Date(maisNovoRemoto.criado_em).getTime())) {
+    await pushSnapshot(maisNovoLocal);
+    return;
+  }
+
   if (!snaps || snaps.length === 0) return;
 
   const ids = snaps.map((s) => s.id);
