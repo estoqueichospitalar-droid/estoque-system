@@ -3,8 +3,11 @@ import {
   listarPedidos,
   registrarRecebimento,
   cancelarPedido,
-  editarPedido,
+  editarPedidoComDestinos,
 } from '../lib/historicoPedidos';
+import { listarFornecedores } from '../lib/fornecedores';
+
+const MANUAL = '__manual__';
 
 const STATUS_COR = {
   pendente: { cor: 'var(--amarelo)', fundo: 'var(--amarelo-claro)', label: 'Pendente' },
@@ -25,8 +28,26 @@ const FILTROS_STATUS = [
  * campos editáveis, com busca no catálogo pra adicionar item esquecido. */
 function EdicaoPedido({ pedido, snapshot, onSalvar, onCancelar }) {
   const [fornecedor, setFornecedor] = useState(pedido.fornecedor);
-  const [itens, setItens] = useState(() => pedido.itens.map((i) => ({ ...i })));
+  const [itens, setItens] = useState(() => pedido.itens.map((i) => ({ ...i, destino: '' })));
   const [busca, setBusca] = useState('');
+  const fornecedoresCadastrados = useMemo(
+    () => listarFornecedores().filter((f) => f.ativo).sort((a, b) => a.nome.localeCompare(b.nome)),
+    []
+  );
+  // "Fornecedor único": escolha do fornecedor que vai valer pra todos os itens.
+  const [escolhido, setEscolhido] = useState('');
+  const [nomeManual, setNomeManual] = useState('');
+  const nomeEscolhido = escolhido === MANUAL ? nomeManual.trim() : escolhido;
+
+  function aplicarATodos() {
+    if (!nomeEscolhido) return;
+    setFornecedor(nomeEscolhido);
+    setItens((atual) => atual.map((i) => ({ ...i, destino: '' })));
+  }
+
+  function definirDestino(codigo, destino) {
+    setItens((atual) => atual.map((i) => (i.codigo === codigo ? { ...i, destino } : i)));
+  }
 
   const codigosJaNoPedido = useMemo(() => new Set(itens.map((i) => i.codigo)), [itens]);
 
@@ -62,14 +83,29 @@ function EdicaoPedido({ pedido, snapshot, onSalvar, onCancelar }) {
 
   return (
     <div style={{ marginTop: 12 }}>
-      <label style={{ fontSize: 11, display: 'block', marginBottom: 8 }}>
-        Fornecedor{' '}
-        <input type="text" value={fornecedor} onChange={(e) => setFornecedor(e.target.value)} style={{ width: 220 }} />
-      </label>
+      <div className="card" style={{ marginBottom: 12, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 13 }}>Fornecedor do pedido: <strong>{fornecedor}</strong></span>
+        <select value={escolhido} onChange={(e) => setEscolhido(e.target.value)} style={{ minWidth: 220 }}>
+          <option value="">Escolha o fornecedor de todos os itens…</option>
+          {fornecedoresCadastrados.map((f) => <option key={f.id} value={f.nome}>{f.nome}</option>)}
+          <option value={MANUAL}>Outro (digitar)…</option>
+        </select>
+        {escolhido === MANUAL && (
+          <input type="text" placeholder="Nome do fornecedor" value={nomeManual} style={{ width: 200 }}
+            onChange={(e) => setNomeManual(e.target.value)} />
+        )}
+        <button className="btn pequeno" disabled={!nomeEscolhido} onClick={aplicarATodos}>
+          Aplicar a todos os itens
+        </button>
+        <span style={{ fontSize: 11, color: 'var(--muted)', flexBasis: '100%' }}>
+          Ou escolha o fornecedor item a item na coluna Fornecedor: itens de outro fornecedor vão para um pedido
+          separado dele (ou são juntados a um pedido pendente que ele já tenha) ao salvar.
+        </span>
+      </div>
 
       <table>
         <thead>
-          <tr><th>Código</th><th>Descrição</th><th>Qtd. pedida</th><th>Custo Un.</th><th>Recebido</th><th></th></tr>
+          <tr><th>Código</th><th>Descrição</th><th>Qtd. pedida</th><th>Custo Un.</th><th>Fornecedor</th><th>Recebido</th><th></th></tr>
         </thead>
         <tbody>
           {itens.map((item) => (
@@ -83,6 +119,20 @@ function EdicaoPedido({ pedido, snapshot, onSalvar, onCancelar }) {
               <td>
                 <input type="number" min="0" step="0.01" value={item.custoUnit} style={{ width: 80 }}
                   onChange={(e) => atualizarItem(item.codigo, 'custoUnit', e.target.value)} />
+              </td>
+              <td>
+                <select
+                  value={item.destino ?? ''}
+                  disabled={(item.qtdRecebida ?? 0) > 0}
+                  title={(item.qtdRecebida ?? 0) > 0 ? 'Item já recebido (total ou em parte): não muda de fornecedor' : undefined}
+                  style={{ width: 170 }}
+                  onChange={(e) => definirDestino(item.codigo, e.target.value)}
+                >
+                  <option value="">Mesmo do pedido ({fornecedor})</option>
+                  {fornecedoresCadastrados
+                    .filter((f) => f.nome.trim().toLowerCase() !== fornecedor.trim().toLowerCase())
+                    .map((f) => <option key={f.id} value={f.nome}>{f.nome}</option>)}
+                </select>
               </td>
               <td>{item.qtdRecebida ?? 0}</td>
               <td>
@@ -167,9 +217,16 @@ export default function HistoricoPedidos({ snapshot }) {
   }
 
   function handleSalvarEdicao(pedidoId, dados) {
-    editarPedido(pedidoId, dados);
+    const resultado = editarPedidoComDestinos(pedidoId, dados, (nome, destino, ehOPedidoEditado) => window.confirm(
+      `Já existe um pedido pendente de "${nome}" (${destino.itens.length} item(ns), criado em ${new Date(destino.criadoEm).toLocaleDateString('pt-BR')}).\n\n` +
+      (ehOPedidoEditado
+        ? 'Juntar os itens deste pedido a ele? (este pedido ficará como cancelado/unificado)\n'
+        : 'Juntar os itens movidos a ele?\n') +
+      'OK = juntar · Cancelar = manter como pedido separado.'
+    ));
     setEditando(null);
     recarregar();
+    if (resultado?.resumo?.length) window.alert(resultado.resumo.join('\n'));
   }
 
   const contagensStatus = useMemo(() => {
