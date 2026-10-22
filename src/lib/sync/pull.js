@@ -118,6 +118,7 @@ async function puxarSnapshots() {
     },
     itens: itensPorSnapshot.get(s.id) ?? [],
     avisos: [],
+    fontes: s.fontes ?? null,
   }));
 
   const local = lerLocal(CHAVE_SNAPSHOTS, []);

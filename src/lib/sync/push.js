@@ -87,6 +87,7 @@ export async function pushSnapshot(registro) {
       itens_negativos: registro.resumo.itensNegativos,
       itens_zerados: registro.resumo.itensZerados,
       itens_positivos: registro.resumo.itensPositivos,
+      fontes: registro.fontes ?? null,
     });
     if (erroCabecalho) throw erroCabecalho;
 

@@ -5,6 +5,8 @@ import AnaliseIA from './AnaliseIA';
 import GraficoFaturamentoEstoque from './GraficoFaturamentoEstoque';
 import EscoamentoEstoque from './EscoamentoEstoque';
 
+const NOME_RELATORIO = { positivo: 'estoque positivo', negativo: 'estoque negativo', zerado: 'estoque zerado' };
+
 function fmtMoeda(v) {
   return `R$ ${v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -23,6 +25,8 @@ export default function Dashboard({ snapshot }) {
 
   const { resumo } = atual;
   const diffValor = anterior ? resumo.valorTotalEstoque - anterior.resumo.valorTotalEstoque : null;
+  // Tipos de relatório que não foram reimportados nesta rodada e mantiveram o último já importado.
+  const mantidos = Object.entries(atual.fontes ?? {}).filter(([, f]) => f?.herdado);
 
   return (
     <div>
@@ -31,6 +35,14 @@ export default function Dashboard({ snapshot }) {
         Snapshot gerado em {new Date(atual.criadoEm).toLocaleString('pt-BR')}
         {anterior && ` · comparado ao snapshot de ${new Date(anterior.criadoEm).toLocaleString('pt-BR')}`}
       </p>
+
+      {mantidos.length > 0 && (
+        <p style={{ fontSize: 12, color: 'var(--amarelo)', marginTop: -6, fontWeight: 600 }}>
+          ⚠ Mantido de importações anteriores: {mantidos
+            .map(([tipo, f]) => `${NOME_RELATORIO[tipo] ?? tipo} (relatório de ${new Date(f.data).toLocaleDateString('pt-BR')}, ${f.itens} itens)`)
+            .join(' · ')}. Reimporte esse relatório para atualizar.
+        </p>
+      )}
 
       <div className="kpi-grid">
         <div className="kpi-card">

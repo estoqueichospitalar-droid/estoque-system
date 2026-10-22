@@ -197,19 +197,29 @@ export function parseRelatorioEstoque(textoCompleto, origem) {
 }
 
 /**
- * Une os três relatórios (positivo, negativo, zerado) num único snapshot de estoque.
- * Quando o mesmo código aparece em mais de um relatório (não deveria, mas por
- * segurança), o valor do relatório "positivo" tem prioridade.
+ * Une os relatórios (positivo, negativo, zerado) num único snapshot de estoque.
+ *
+ * `herdados` traz, pra cada tipo que NÃO foi importado agora, o último
+ * relatório desse tipo já importado antes ({ itens, data }). Eles entram
+ * primeiro, e qualquer relatório recente sobrescreve: um produto que aparece
+ * agora no positivo ou no zerado deixa de ser o "negativo antigo". O que o
+ * relatório novo não traz continua como estava (ex: item negativo cujo
+ * relatório não foi reimportado). Entre relatórios do mesmo grupo, o positivo
+ * tem prioridade, depois o zerado, depois o negativo.
+ *
+ * `fontes` registra de onde veio cada tipo (data e se foi herdado), pra tela
+ * mostrar "negativos: relatório de 08/10".
  */
-export function unificarSnapshot({ positivo, negativo, zerado }) {
+export function unificarSnapshot({ positivo, negativo, zerado, herdados = {} }) {
   const mapa = new Map();
+  const recentes = { positivo, negativo, zerado };
+  const ordemPrioridade = ['negativo', 'zerado', 'positivo']; // positivo sobrescreve por último
 
-  const ordemPrioridade = [negativo, zerado, positivo]; // positivo sobrescreve por último
-  for (const relatorio of ordemPrioridade) {
-    if (!relatorio) continue;
-    for (const item of relatorio.itens) {
-      mapa.set(item.codigo, item);
-    }
+  for (const tipo of ordemPrioridade) {
+    for (const item of herdados[tipo]?.itens ?? []) mapa.set(item.codigo, item);
+  }
+  for (const tipo of ordemPrioridade) {
+    for (const item of recentes[tipo]?.itens ?? []) mapa.set(item.codigo, item);
   }
 
   const itens = Array.from(mapa.values());
@@ -219,6 +229,14 @@ export function unificarSnapshot({ positivo, negativo, zerado }) {
     ...(zerado?.avisos ?? []),
   ];
 
+  const geradoEm = new Date().toISOString();
+  const fontes = {};
+  for (const tipo of ordemPrioridade) {
+    const quantidade = itens.filter((i) => i.origem === tipo).length;
+    if (recentes[tipo]) fontes[tipo] = { data: geradoEm, herdado: false, itens: quantidade };
+    else if (herdados[tipo]) fontes[tipo] = { data: herdados[tipo].data, herdado: true, itens: quantidade };
+  }
+
   const resumo = {
     totalItens: itens.length,
     valorTotalEstoque: itens.reduce((s, i) => s + (i.total > 0 ? i.total : 0), 0),
@@ -227,5 +245,5 @@ export function unificarSnapshot({ positivo, negativo, zerado }) {
     itensPositivos: itens.filter((i) => i.quantidade > 0).length,
   };
 
-  return { itens, avisos, resumo, geradoEm: new Date().toISOString() };
+  return { itens, avisos, resumo, fontes, geradoEm };
 }

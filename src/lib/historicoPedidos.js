@@ -36,6 +36,7 @@ export function salvarSnapshot(snapshot) {
     resumo: snapshot.resumo,
     itens: snapshot.itens,
     avisos: snapshot.avisos,
+    fontes: snapshot.fontes ?? null,
   };
   lista.unshift(registro); // mais recente primeiro
   pushSnapshot(registro); // manda o snapshot inteiro pro Supabase antes de truncar localmente

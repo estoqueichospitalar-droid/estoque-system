@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { extrairTextoPdf } from '../lib/pdfExtract';
 import { parseRelatorioEstoque, unificarSnapshot } from '../lib/parsers/estoqueParser';
 import { salvarSnapshot } from '../lib/historicoPedidos';
+import { buscarRelatoriosAnteriores } from '../lib/relatoriosAnteriores';
 
 const TIPOS = [
   { chave: 'positivo', titulo: 'Estoque positivo', descricao: 'Itens de estoque atual (quantidade > 0)' },
@@ -72,6 +73,17 @@ export default function ImportarEstoque({ onSnapshotGerado }) {
   const [resultados, setResultados] = useState({});
   const [analiseGerada, setAnaliseGerada] = useState(null);
   const [erroGeral, setErroGeral] = useState(null);
+  // Último relatório já importado de cada tipo (null enquanto carrega) — é o
+  // que vale pra qualquer tipo que não for enviado agora.
+  const [anteriores, setAnteriores] = useState(null);
+
+  useEffect(() => {
+    let ativo = true;
+    buscarRelatoriosAnteriores()
+      .then((r) => { if (ativo) setAnteriores(r); })
+      .catch(() => { if (ativo) setAnteriores({ positivo: null, negativo: null, zerado: null }); });
+    return () => { ativo = false; };
+  }, []);
 
   async function handleArquivo(chave, file) {
     setArquivos((s) => ({ ...s, [chave]: file }));
@@ -95,10 +107,15 @@ export default function ImportarEstoque({ onSnapshotGerado }) {
 
   const todosProcessados = TIPOS.every((t) => status[t.chave] === 'ok');
   const totalAvisos = Object.values(resultados).reduce((s, r) => s + (r?.avisos?.length ?? 0), 0);
-  // Positivo e zerado prontos, negativo não enviado: o relatório de negativos
-  // pode nem existir quando não há item negativo — deixa gerar assim mesmo.
-  const semNegativoPronto = status.positivo === 'ok' && status.zerado === 'ok'
-    && status.negativo !== 'ok' && status.negativo !== 'processando';
+  // Regra: tipo de relatório não enviado agora mantém o último já importado.
+  // O negativo pode nunca ter existido (sem itens negativos) e tudo bem; já
+  // positivo e zerado sem nenhuma importação anterior não dá pra completar.
+  const algumProcessando = TIPOS.some((t) => status[t.chave] === 'processando');
+  const algumEnviado = TIPOS.some((t) => status[t.chave] === 'ok');
+  const faltantes = TIPOS.filter((t) => status[t.chave] !== 'ok');
+  const faltamSemAnterior = faltantes.filter((t) => t.chave !== 'negativo' && !anteriores?.[t.chave]);
+  const mostrarCompletarComAnteriores = !todosProcessados && algumEnviado && !algumProcessando;
+  const podeCompletarComAnteriores = mostrarCompletarComAnteriores && anteriores !== null && faltamSemAnterior.length === 0;
 
   // Sem cleanup de propósito: o avanço pra aba de Alertas é um setTimeout, e
   // a própria geração muda `analiseGerada` (dependência do efeito) — um
@@ -109,10 +126,15 @@ export default function ImportarEstoque({ onSnapshotGerado }) {
     if (geradoRef.current) return;
     geradoRef.current = true;
     try {
+      const herdados = {};
+      for (const t of TIPOS) {
+        if (status[t.chave] !== 'ok' && anteriores?.[t.chave]) herdados[t.chave] = anteriores[t.chave];
+      }
       const snapshot = unificarSnapshot({
         positivo: resultados.positivo,
         negativo: resultados.negativo,
         zerado: resultados.zerado,
+        herdados,
       });
       const registro = salvarSnapshot(snapshot);
       setAnaliseGerada(registro);
@@ -122,7 +144,7 @@ export default function ImportarEstoque({ onSnapshotGerado }) {
       console.error(e);
       setErroGeral('Não foi possível gerar a análise. Confira os PDFs importados.');
     }
-  }, [resultados, onSnapshotGerado]);
+  }, [resultados, status, anteriores, onSnapshotGerado]);
 
   // Com os 3 relatórios processados a análise sai sozinha, sem clique.
   useEffect(() => {
@@ -134,8 +156,8 @@ export default function ImportarEstoque({ onSnapshotGerado }) {
       <h2>Importar estoque atual</h2>
       <p className="subtitulo-pagina">
         Importe os três relatórios do sistema Net Use (positivo, negativo e zerado). Cada importação gera um novo
-        snapshot com data e hora, comparável ao anterior. Se não houver itens negativos, dá para gerar a análise só
-        com o positivo e o zerado.
+        snapshot com data e hora, comparável ao anterior. Se algum relatório não for enviado, o sistema mantém o
+        último já importado daquele tipo (e avisa de qual data).
       </p>
 
       <div className="dropzone-grid">
@@ -189,13 +211,27 @@ export default function ImportarEstoque({ onSnapshotGerado }) {
       {!analiseGerada && todosProcessados && !erroGeral && (
         <div className="status-arquivo pendente" style={{ marginBottom: 10 }}>Gerando análise…</div>
       )}
-      {!analiseGerada && semNegativoPronto && !erroGeral && (
+      {!analiseGerada && mostrarCompletarComAnteriores && !erroGeral && (
         <div className="status-arquivo pendente" style={{ marginBottom: 10 }}>
-          Falta o relatório de <strong>estoque negativo</strong>. Se hoje não há itens negativos, gere a análise assim
-          mesmo — nenhum item será marcado como negativo nesta importação.{' '}
-          <button className="btn" onClick={gerarAnalise} style={{ marginLeft: 8 }}>
-            Gerar análise sem negativos
-          </button>
+          {anteriores === null && 'Verificando importações anteriores…'}
+          {anteriores !== null && faltantes.map((t) => {
+            const anterior = anteriores[t.chave];
+            return (
+              <div key={t.chave}>
+                <strong>{t.titulo}</strong> não enviado:{' '}
+                {anterior
+                  ? `será mantido o relatório de ${new Date(anterior.data).toLocaleDateString('pt-BR')} (${anterior.itens.length} itens), exceto produtos que aparecerem nos relatórios novos.`
+                  : t.chave === 'negativo'
+                    ? 'nunca foi importado — nenhum item será marcado como negativo.'
+                    : 'ainda não há importação anterior; envie este relatório.'}
+              </div>
+            );
+          })}
+          {anteriores !== null && (
+            <button className="btn" disabled={!podeCompletarComAnteriores} onClick={gerarAnalise} style={{ marginTop: 8 }}>
+              Gerar análise mantendo os relatórios anteriores
+            </button>
+          )}
         </div>
       )}
     </div>

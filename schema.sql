@@ -28,8 +28,14 @@ create table if not exists snapshots_estoque (
   valor_total_estoque numeric(14,2) not null,
   itens_negativos integer not null default 0,
   itens_zerados integer not null default 0,
-  itens_positivos integer not null default 0
+  itens_positivos integer not null default 0,
+  -- De onde veio cada tipo de relatório: { "negativo": { "data": "...", "herdado": true, "itens": 22 }, ... }.
+  -- "herdado" = não foi importado nesta rodada, manteve o último já importado.
+  fontes jsonb
 );
+
+-- Migração pra quem já rodou uma versão anterior deste script — seguro rodar de novo.
+alter table snapshots_estoque add column if not exists fontes jsonb;
 
 -- Itens de cada snapshot (uma linha por produto por importação)
 create table if not exists itens_estoque (
