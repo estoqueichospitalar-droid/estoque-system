@@ -1,6 +1,8 @@
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 
-const AZUL = rgb(0x0c / 255, 0x3d / 255, 0x6e / 255);
+// Azul do fundo da logo (#002060) — faixa do topo, barras de fornecedor e
+// totais usam o mesmo tom, pra a logo se fundir ao cabeçalho sem emenda.
+const AZUL = rgb(0, 0x20 / 255, 0x60 / 255);
 const CINZA_TEXTO = rgb(0x37 / 255, 0x41 / 255, 0x51 / 255);
 const CINZA_MUTED = rgb(0x6b / 255, 0x72 / 255, 0x80 / 255);
 const CINZA_BORDA = rgb(0xe2 / 255, 0xe5 / 255, 0xea / 255);
@@ -10,6 +12,16 @@ const BRANCO = rgb(1, 1, 1);
 const MARGEM = 40;
 const LARGURA_PAGINA = 595.28; // A4
 const ALTURA_PAGINA = 841.89;
+const ALTURA_CABECALHO = 84;
+// A imagem da logo (public/logo-ic-pdf.png) já traz o fundo azul e uma
+// pequena folga à esquerda; este recuo alinha a marca com a margem do texto.
+const RECUO_LOGO = 12;
+
+/** Logo do cabeçalho do PDF, já com o fundo azul da marca. */
+export async function carregarLogoPdf() {
+  const resposta = await fetch('/logo-ic-pdf.png');
+  return new Uint8Array(await resposta.arrayBuffer());
+}
 
 function fmtMoeda(v) {
   return `R$ ${v.toFixed(2).replace('.', ',')}`;
@@ -67,24 +79,28 @@ export async function gerarOrdemCompraPdf({ grupos, referencia, logoBytes, obser
   }
 
   function desenharCabecalhoTopo() {
-    page.drawRectangle({ x: 0, y: ALTURA_PAGINA - 70, width: LARGURA_PAGINA, height: 70, color: AZUL });
+    page.drawRectangle({
+      x: 0, y: ALTURA_PAGINA - ALTURA_CABECALHO, width: LARGURA_PAGINA, height: ALTURA_CABECALHO, color: AZUL,
+    });
     if (logoImg) {
-      const escala = 32 / logoImg.height;
+      const escala = ALTURA_CABECALHO / logoImg.height;
       page.drawImage(logoImg, {
-        x: MARGEM,
-        y: ALTURA_PAGINA - 55,
+        x: MARGEM - RECUO_LOGO,
+        y: ALTURA_PAGINA - ALTURA_CABECALHO,
         width: logoImg.width * escala,
-        height: logoImg.height * escala,
+        height: ALTURA_CABECALHO,
       });
     } else {
       page.drawText('IC SUPRA HOSPITALAR', {
-        x: MARGEM, y: ALTURA_PAGINA - 45, size: 14, font: fontBold, color: BRANCO,
+        x: MARGEM, y: ALTURA_PAGINA - 50, size: 16, font: fontBold, color: BRANCO,
       });
     }
-    page.drawText('ORDEM DE COMPRA', {
-      x: LARGURA_PAGINA - MARGEM - 140, y: ALTURA_PAGINA - 45, size: 13, font: fontBold, color: BRANCO,
+    const titulo = 'ORDEM DE COMPRA';
+    const larguraTitulo = fontBold.widthOfTextAtSize(titulo, 13);
+    page.drawText(titulo, {
+      x: LARGURA_PAGINA - MARGEM - larguraTitulo, y: ALTURA_PAGINA - ALTURA_CABECALHO / 2 - 4, size: 13, font: fontBold, color: BRANCO,
     });
-    y = ALTURA_PAGINA - 90;
+    y = ALTURA_PAGINA - ALTURA_CABECALHO - 22;
   }
 
   desenharCabecalhoTopo();

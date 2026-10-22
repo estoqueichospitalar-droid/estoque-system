@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
-import { gerarOrdemCompraPdf, baixarPdf } from '../lib/ordemCompraPdf';
+import { gerarOrdemCompraPdf, baixarPdf, carregarLogoPdf } from '../lib/ordemCompraPdf';
+import { opcoesUnidade, unidadePadrao } from '../lib/unidades';
 import { criarPedido } from '../lib/historicoPedidos';
 import { getConfigProduto, salvarConfigProduto } from '../lib/configProdutos';
 import { listarVinculos, listarFornecedores, marcarDisponibilidade, calcularModalidadeFrete, vincularProdutoFornecedor } from '../lib/fornecedores';
@@ -56,6 +57,7 @@ export default function OrdemCompra({
       const melhor = opcoesFornecedor(item.codigo, vinculos, fornecedores)[0];
       iniciais[item.codigo] = {
         qtd: item.alerta?.quantidadeSugerida ?? 1,
+        unidade: unidadePadrao(item.unidade),
         fornecedorId: melhor?.fornecedor.id ?? null,
         fornecedorTexto: melhor ? '' : (cfg?.fornecedor ?? ''),
         custoUnit: melhor ? (melhor.vinculo.custoUnitario ?? item.precoCusto ?? 0) : (item.precoCusto ?? 0),
@@ -135,7 +137,7 @@ export default function OrdemCompra({
       mapa.get(nomeFornecedor).itens.push({
         codigo: item.codigo,
         descricao: item.descricao,
-        unidade: item.unidade,
+        unidade: c.unidade,
         qtd: Number(c.qtd) || 0,
         custoUnit: Number(c.custoUnit) || 0,
         nivel: item.alerta?.nivel,
@@ -162,8 +164,7 @@ export default function OrdemCompra({
         }
       }
 
-      const logoResp = await fetch('/logo-ic.png');
-      const logoBytes = new Uint8Array(await logoResp.arrayBuffer());
+      const logoBytes = await carregarLogoPdf();
 
       const bytes = await gerarOrdemCompraPdf({
         grupos,
@@ -233,6 +234,7 @@ export default function OrdemCompra({
           <tr>
             <th>Código</th>
             <th>Descrição</th>
+            <th>Un.</th>
             <th>Qtd.</th>
             <th>Custo Un. (R$)</th>
             <th>Fornecedor</th>
@@ -252,6 +254,12 @@ export default function OrdemCompra({
               <tr key={item.codigo}>
                 <td>{item.codigo}</td>
                 <td>{item.descricao}</td>
+                <td>
+                  <select value={c.unidade} style={{ width: 92 }} title="Unidade em que este item será pedido"
+                    onChange={(e) => atualizarCampo(item.codigo, 'unidade', e.target.value)}>
+                    {opcoesUnidade(c.unidade).map((u) => <option key={u.sigla} value={u.sigla}>{u.sigla} — {u.nome}</option>)}
+                  </select>
+                </td>
                 <td>
                   <input type="number" min="0" value={c.qtd} style={{ width: 70 }}
                     onChange={(e) => atualizarCampo(item.codigo, 'qtd', e.target.value)} />

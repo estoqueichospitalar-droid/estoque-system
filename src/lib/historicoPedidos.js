@@ -63,7 +63,7 @@ export function getSnapshotAnterior() {
  * Estrutura de um pedido:
  * {
  *   id, criadoEm, fornecedor,
- *   status: 'pendente' | 'parcial' | 'recebido' | 'cancelado',
+ *   status: 'pendente' | 'enviado' | 'parcial' | 'recebido' | 'cancelado',
  *   motivoCancelamento: string | null, // só preenchido quando status = 'cancelado'
  *   itens: [{ codigo, descricao, unidade, qtdPedida, qtdRecebida, custoUnit }]
  * }
@@ -73,7 +73,10 @@ function recalcularStatus(pedido) {
   if (pedido.status === 'cancelado') return; // cancelado nunca volta sozinho
   const totalPedido = pedido.itens.reduce((s, i) => s + i.qtdPedida, 0);
   const totalRecebido = pedido.itens.reduce((s, i) => s + (i.qtdRecebida ?? 0), 0);
-  pedido.status = totalRecebido === 0 ? 'pendente' : totalRecebido >= totalPedido ? 'recebido' : 'parcial';
+  // "enviado" (mandado ao fornecedor) só existe enquanto nada foi recebido —
+  // o primeiro recebimento já move o pedido pra parcial/recebido.
+  const semRecebimento = pedido.status === 'enviado' ? 'enviado' : 'pendente';
+  pedido.status = totalRecebido === 0 ? semRecebimento : totalRecebido >= totalPedido ? 'recebido' : 'parcial';
 }
 
 export function criarPedido({ fornecedor, itens, observacoes }) {
@@ -125,6 +128,33 @@ export function registrarRecebimento(id, codigo, qtdRecebidaAdicional) {
   return pedido;
 }
 
+/** Marca que o pedido (PDF) foi mandado ao fornecedor. Só vale pra pendente; "voltar" desfaz. */
+export function marcarPedidoEnviado(id, enviado = true) {
+  const lista = ler(CHAVE_PEDIDOS, []);
+  const pedido = lista.find((p) => p.id === id);
+  if (!pedido) return null;
+  if (enviado && pedido.status !== 'pendente') return pedido;
+  if (!enviado && pedido.status !== 'enviado') return pedido;
+  pedido.status = enviado ? 'enviado' : 'pendente';
+  pedido.atualizadoEm = new Date().toISOString();
+  salvar(CHAVE_PEDIDOS, lista);
+  pushPedidoUpsert(pedido);
+  return pedido;
+}
+
+/** Dá como recebido tudo o que ainda falta em cada item do pedido (chegou completo). */
+export function receberTudo(id) {
+  const lista = ler(CHAVE_PEDIDOS, []);
+  const pedido = lista.find((p) => p.id === id);
+  if (!pedido || pedido.status === 'cancelado') return null;
+  for (const item of pedido.itens) item.qtdRecebida = item.qtdPedida;
+  recalcularStatus(pedido);
+  pedido.atualizadoEm = new Date().toISOString();
+  salvar(CHAVE_PEDIDOS, lista);
+  pushPedidoUpsert(pedido);
+  return pedido;
+}
+
 /**
  * Cancela um pedido (o motivo fica registrado e visível no histórico) — não
  * some da lista, só muda de status. Diferente de "recebido"/"parcial", um
@@ -155,6 +185,9 @@ export function editarPedido(id, { fornecedor, itens }) {
   if (!pedido) return null;
   if (fornecedor !== undefined) pedido.fornecedor = fornecedor;
   if (itens !== undefined) pedido.itens = itens;
+  // Pedido alterado depois de enviado volta pra pendente: o fornecedor recebeu
+  // outra versão, então precisa reemitir o PDF e enviar de novo.
+  if (pedido.status === 'enviado') pedido.status = 'pendente';
   recalcularStatus(pedido);
   pedido.atualizadoEm = new Date().toISOString();
   salvar(CHAVE_PEDIDOS, lista);

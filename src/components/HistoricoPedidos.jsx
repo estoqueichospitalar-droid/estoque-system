@@ -4,14 +4,18 @@ import {
   registrarRecebimento,
   cancelarPedido,
   editarPedidoComDestinos,
+  marcarPedidoEnviado,
+  receberTudo,
 } from '../lib/historicoPedidos';
+import { opcoesUnidade, unidadePadrao } from '../lib/unidades';
 import { listarFornecedores } from '../lib/fornecedores';
-import { gerarOrdemCompraPdf, baixarPdf } from '../lib/ordemCompraPdf';
+import { gerarOrdemCompraPdf, baixarPdf, carregarLogoPdf } from '../lib/ordemCompraPdf';
 
 const MANUAL = '__manual__';
 
 const STATUS_COR = {
   pendente: { cor: 'var(--amarelo)', fundo: 'var(--amarelo-claro)', label: 'Pendente' },
+  enviado: { cor: 'var(--roxo)', fundo: 'var(--roxo-claro)', label: 'Enviado' },
   parcial: { cor: 'var(--azul)', fundo: 'var(--azul-claro)', label: 'Parcial' },
   recebido: { cor: 'var(--verde)', fundo: 'var(--verde-claro)', label: 'Recebido' },
   cancelado: { cor: 'var(--muted)', fundo: 'var(--cinza)', label: 'Cancelado' },
@@ -20,6 +24,7 @@ const STATUS_COR = {
 const FILTROS_STATUS = [
   { chave: 'TODOS', label: 'Todos' },
   { chave: 'pendente', label: 'Pendente' },
+  { chave: 'enviado', label: 'Enviado' },
   { chave: 'parcial', label: 'Parcial' },
   { chave: 'recebido', label: 'Recebido' },
   { chave: 'cancelado', label: 'Cancelado' },
@@ -44,6 +49,10 @@ function EdicaoPedido({ pedido, snapshot, onSalvar, onCancelar }) {
     if (!nomeEscolhido) return;
     setFornecedor(nomeEscolhido);
     setItens((atual) => atual.map((i) => ({ ...i, destino: '' })));
+  }
+
+  function definirUnidade(codigo, unidade) {
+    setItens((atual) => atual.map((i) => (i.codigo === codigo ? { ...i, unidade } : i)));
   }
 
   function definirDestino(codigo, destino) {
@@ -74,7 +83,7 @@ function EdicaoPedido({ pedido, snapshot, onSalvar, onCancelar }) {
     setItens((atual) => [...atual, {
       codigo: itemCatalogo.codigo,
       descricao: itemCatalogo.descricao,
-      unidade: itemCatalogo.unidade || '-',
+      unidade: unidadePadrao(itemCatalogo.unidade),
       qtdPedida: 1,
       qtdRecebida: 0,
       custoUnit: itemCatalogo.precoCusto || 0,
@@ -106,13 +115,19 @@ function EdicaoPedido({ pedido, snapshot, onSalvar, onCancelar }) {
 
       <table>
         <thead>
-          <tr><th>Código</th><th>Descrição</th><th>Qtd. pedida</th><th>Custo Un.</th><th>Fornecedor</th><th>Recebido</th><th></th></tr>
+          <tr><th>Código</th><th>Descrição</th><th>Un.</th><th>Qtd. pedida</th><th>Custo Un.</th><th>Fornecedor</th><th>Recebido</th><th></th></tr>
         </thead>
         <tbody>
           {itens.map((item) => (
             <tr key={item.codigo}>
               <td>{item.codigo}</td>
               <td>{item.descricao}</td>
+              <td>
+                <select value={unidadePadrao(item.unidade)} style={{ width: 92 }} title="Unidade em que este item é pedido"
+                  onChange={(e) => definirUnidade(item.codigo, e.target.value)}>
+                  {opcoesUnidade(unidadePadrao(item.unidade)).map((u) => <option key={u.sigla} value={u.sigla}>{u.sigla} — {u.nome}</option>)}
+                </select>
+              </td>
               <td>
                 <input type="number" min="0" value={item.qtdPedida} style={{ width: 70 }}
                   onChange={(e) => atualizarItem(item.codigo, 'qtdPedida', e.target.value)} />
@@ -202,8 +217,7 @@ export default function HistoricoPedidos({ snapshot }) {
   async function emitirPdf(pedido) {
     setEmitindoPdfId(pedido.id);
     try {
-      const logoResp = await fetch('/logo-ic.png');
-      const logoBytes = new Uint8Array(await logoResp.arrayBuffer());
+      const logoBytes = await carregarLogoPdf();
       const dataCriacao = new Date(pedido.criadoEm).toLocaleDateString('pt-BR');
       const dataEdicao = pedido.atualizadoEm ? new Date(pedido.atualizadoEm).toLocaleDateString('pt-BR') : null;
       const bytes = await gerarOrdemCompraPdf({
@@ -240,6 +254,19 @@ export default function HistoricoPedidos({ snapshot }) {
     recarregar();
   }
 
+  function handleEnviado(pedidoId, enviado) {
+    marcarPedidoEnviado(pedidoId, enviado);
+    recarregar();
+  }
+
+  function handleReceberTudo(pedido) {
+    const faltando = pedido.itens.filter((i) => (i.qtdRecebida ?? 0) < i.qtdPedida).length;
+    if (faltando === 0) return;
+    if (!window.confirm(`Dar como recebido tudo o que falta neste pedido (${faltando} item(ns)) de ${pedido.fornecedor}?`)) return;
+    receberTudo(pedido.id);
+    recarregar();
+  }
+
   function handleCancelar(pedidoId) {
     const motivo = window.prompt('Motivo do cancelamento (obrigatório):');
     if (!motivo || !motivo.trim()) return; // sem motivo, não cancela
@@ -268,7 +295,7 @@ export default function HistoricoPedidos({ snapshot }) {
   }
 
   const contagensStatus = useMemo(() => {
-    const c = { pendente: 0, parcial: 0, recebido: 0, cancelado: 0 };
+    const c = { pendente: 0, enviado: 0, parcial: 0, recebido: 0, cancelado: 0 };
     for (const p of pedidos) if (c[p.status] !== undefined) c[p.status] += 1;
     return c;
   }, [pedidos]);
@@ -322,6 +349,33 @@ export default function HistoricoPedidos({ snapshot }) {
                     {emitindoPdfId === pedido.id ? 'Gerando…' : '📄 Emitir PDF'}
                   </button>
                 )}
+                {pedido.status === 'pendente' && (
+                  <button
+                    className="btn secundario pequeno"
+                    title="Registra que o PDF foi mandado ao fornecedor (ex: pelo WhatsApp da empresa)"
+                    onClick={() => handleEnviado(pedido.id, true)}
+                  >
+                    ✉ Marcar como enviado
+                  </button>
+                )}
+                {pedido.status === 'enviado' && (
+                  <button
+                    className="btn secundario pequeno"
+                    title="Desfaz o 'enviado' — o pedido volta a pendente"
+                    onClick={() => handleEnviado(pedido.id, false)}
+                  >
+                    ↩ Voltar para pendente
+                  </button>
+                )}
+                {['pendente', 'enviado', 'parcial'].includes(pedido.status) && (
+                  <button
+                    className="btn secundario pequeno"
+                    title="A mercadoria chegou completa: marca todos os itens como recebidos"
+                    onClick={() => handleReceberTudo(pedido)}
+                  >
+                    ✔ Receber tudo
+                  </button>
+                )}
                 {pedido.status !== 'cancelado' && (
                   <button
                     className="btn secundario pequeno"
@@ -368,13 +422,14 @@ export default function HistoricoPedidos({ snapshot }) {
             {aberto === pedido.id && !emEdicao && (
               <table style={{ marginTop: 12 }}>
                 <thead>
-                  <tr><th>Código</th><th>Descrição</th><th>Pedido</th><th>Recebido</th><th></th></tr>
+                  <tr><th>Código</th><th>Descrição</th><th>Un.</th><th>Pedido</th><th>Recebido</th><th></th></tr>
                 </thead>
                 <tbody>
                   {pedido.itens.map((item) => (
                     <tr key={item.codigo}>
                       <td>{item.codigo}</td>
                       <td>{item.descricao}</td>
+                      <td>{unidadePadrao(item.unidade)}</td>
                       <td>{item.qtdPedida}</td>
                       <td>{item.qtdRecebida ?? 0}</td>
                       <td>
